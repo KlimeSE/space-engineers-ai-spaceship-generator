@@ -1,10 +1,10 @@
 # 🚀 Space Engineers AI Spaceship Generator 🚀
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![Lines of code](https://img.shields.io/tokei/lines/github/arayabrain/space-engineers-ai-spaceship-generator)
-![GitHub issues](https://img.shields.io/github/issues-raw/arayabrain/space-engineers-ai-spaceship-generator)
-![GitHub forks](https://img.shields.io/github/forks/arayabrain/space-engineers-ai-spaceship-generator?style=social)
-![GitHub Repo stars](https://img.shields.io/github/stars/arayabrain/space-engineers-ai-spaceship-generator?style=social)
-![GitHub last commit](https://img.shields.io/github/last-commit/arayabrain/space-engineers-ai-spaceship-generator)
+![Lines of code](https://img.shields.io/tokei/lines/github/GoodAI/space-engineers-ai-spaceship-generator)
+![GitHub issues](https://img.shields.io/github/issues-raw/GoodAI/space-engineers-ai-spaceship-generator)
+![GitHub forks](https://img.shields.io/github/forks/GoodAI/space-engineers-ai-spaceship-generator?style=social)
+![GitHub Repo stars](https://img.shields.io/github/stars/GoodAI/space-engineers-ai-spaceship-generator?style=social)
+![GitHub last commit](https://img.shields.io/github/last-commit/GoodAI/space-engineers-ai-spaceship-generator)
 
 <p align="center">
   <img src="media/pcgsepy_banner.png" alt="pcgsepy_banner" height="120"/>
@@ -17,6 +17,10 @@
 ### Introduction
 
 Apps and code (`PCGSEPy` library) developed for the [Space Engineers](https://www.spaceengineersgame.com/) PCG project, supported by a [GoodAI research grant](https://www.goodai.com/using-open-ended-algorithms-to-generate-video-game-content-in-space-engineers/). The main app is the AI Spaceship Generator, which creates spaceships for Space Engineers using AI (for more information, see our [research explainer](#research) and [publications](#publications)). The second app is a Spaceships Ranker, which is used for conducting a user study.
+
+### Development status
+
+You can check the current status of development of the application at the [wiki](https://github.com/GoodAI/space-engineers-ai-spaceship-generator/wiki/Development-status).
 
 ## Apps
 The following is a quick overview of the apps (AI Spaceship Generator and Spaceships Ranker). Further documentation is available within the apps themselves.
