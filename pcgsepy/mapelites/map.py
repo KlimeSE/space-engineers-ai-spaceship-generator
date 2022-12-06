@@ -272,7 +272,8 @@ class MAPElites:
         return cs
 
     def _prepare_cs_content(self,
-                            cs: CandidateSolution) -> CandidateSolution:
+                            cs: CandidateSolution,
+                            add_hull: bool = True) -> CandidateSolution:
         """Prepare a candidate solution for fitness computation.
         Add a hull if possible and set the blocks colors.
 
@@ -283,7 +284,7 @@ class MAPElites:
             CandidateSolution: The updated candidate solution.
         """
         # add hull if possible
-        if self.hull_builder:
+        if self.hull_builder and add_hull:
             threadsafe_hullbuilder = HullBuilder(erosion_type=self.hull_builder.erosion_type,
                                                  apply_erosion=self.hull_builder.apply_erosion,
                                                  apply_smoothing=self.hull_builder.apply_smoothing)
@@ -293,6 +294,7 @@ class MAPElites:
         # rotate according to tileset orientation
         # TODO: this is hardcoded, but should be read from a config file
         cs.content.rotate(along=1, k=3)
+        logging.getLogger('mapelites').debug(f'[{__name__}._prepare_cs_content] Prepared {cs.string} ({add_hull=}).')
         return cs
     
     def _set_behavior_descriptors(self,
@@ -496,6 +498,8 @@ class MAPElites:
                 subdivide_solutions(lcs=solutions,
                                     lsystem=self.lsystem)
                 for cs in solutions:
+                    self._prepare_cs_content(cs=cs,
+                                             add_hull=False)
                     if cs.is_feasible and len(feasible_pop) < pop_size and cs not in feasible_pop:
                         if self.hull_builder is not None:
                             self.hull_builder.add_external_hull(structure=cs._content)

@@ -1,77 +1,15 @@
 from datetime import datetime
 from enum import Enum
 import logging
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from pcgsepy.config import BIN_POP_SIZE, CS_MAX_AGE, MY_EMITTERS, N_EMITTER_STEPS
+from pcgsepy.config import BIN_POP_SIZE, CS_MAX_AGE, N_EMITTER_STEPS
 from pcgsepy.mapelites.behaviors import (BehaviorCharacterization, avg_ma,
                                          mame, mami, symmetry)
 
 from pcgsepy.mapelites.map import MAPElites
-
-
-class Metric:
-    def __init__(self,
-                 emitters: List[str],
-                 exp_n: int,
-                 name: str,
-                 multiple_values: bool = False) -> None:
-        """Create a `Metric` object.
-
-        Args:
-            emitters (List[str]): The list of emitters names.
-            exp_n (int): The current experiment number.
-            name (str): The name of the metric.
-            multiple_values (bool, optional): Whether this metric tracks multiple values per generation or a sum. Defaults to False.
-        """
-        self.name = name
-        self.current_generation: int = 0
-        self.multiple_values = multiple_values
-        self.history: Dict[int, List[Any]] = {
-            self.current_generation: [] if multiple_values else 0
-        }
-        self.emitter_names: List[str] = [emitters[exp_n]]
-    
-    def add(self,
-            value: Any):
-        """Add a new value to the current generation.
-
-        Args:
-            value (Any): The new value.
-        """
-        if self.multiple_values:
-            self.history[self.current_generation].append(value)
-        else:
-            self.history[self.current_generation] += value
-    
-    def reset(self):
-        """Clear the metric trackings."""
-        if self.multiple_values:
-            self.history[self.current_generation] = []
-        else:
-            self.history[self.current_generation] = 0
-    
-    def new_generation(self,
-                       emitters: List[str],
-                       exp_n: int):
-        """Start a new generation to track.
-
-        Args:
-            emitters (List[str]): The list of emitter names.
-            exp_n (int): The current experiment number.
-        """
-        self.current_generation += 1
-        self.reset()
-        self.emitter_names.append(emitters[exp_n])
-    
-    def get_averages(self) -> List[Any]:
-        """Get the metric averages over the history.
-
-        Returns:
-            List[Any]: The list of averages.
-        """
-        return [np.mean(l) for l in self.history.values()]
 
 
 class Semaphore:
@@ -131,7 +69,6 @@ class DashLoggerHandler(logging.StreamHandler):
 
 class AppMode(Enum):
     """Enumerator for the application mode."""
-    USERSTUDY = 0
     USER = 1
     DEV = 2
 
@@ -140,10 +77,8 @@ class AppSettings:
     def __init__(self) -> None:
         """Generate a new `AppSettings` object."""
         self.current_mapelites: Optional[MAPElites] = None
-        self.exp_n: int = 0
         self.gen_counter: int = 0
         self.hm_callback_props: Dict[str, Any] = {}
-        self.my_emitterslist: List[str] = MY_EMITTERS.copy()
         self.behavior_descriptors: List[BehaviorCharacterization] = [
             BehaviorCharacterization(name='Major axis / Medium axis',
                                     func=mame,
@@ -158,12 +93,11 @@ class AppSettings:
                                     func=symmetry,
                                     bounds=(0, 1))
         ]
-        self.rngseed: int = None
+        self.rngseed = uuid.uuid4().int
         self.selected_bins: List[Tuple[int, int]] = []
         self.step_progress: int = -1
         self.use_custom_colors: bool = True
         self.app_mode: AppMode = None
-        self.consent_ok: bool = None
         self.emitter_steps: int = N_EMITTER_STEPS
         self.symmetry: Optional[str] = None
 
@@ -177,7 +111,7 @@ class AppSettings:
             dev_mode (bool, optional): Whether to set the application to developer mode. Defaults to False.
         """
         self.current_mapelites = mapelites
-        self.app_mode = AppMode.DEV if dev_mode else self.app_mode
+        self.app_mode = AppMode.DEV if dev_mode else AppMode.USER
         self.hm_callback_props['pop'] = {
             'Feasible': 'feasible',
             'Infeasible': 'infeasible'

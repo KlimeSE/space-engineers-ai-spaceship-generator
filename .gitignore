@@ -9,3 +9,7 @@ cppn-system/*
 custom-tests/*
 icmap-elites/estimators_perf.log
 PCGSEPy.egg-info/*
+*.spec
+build/*
+dist/*
+*.exe
