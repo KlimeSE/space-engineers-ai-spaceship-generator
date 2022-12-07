@@ -4,7 +4,6 @@ __pycache__/*
 .vscode/*
 *.jupyterlab-workspace
 *.pyc
-block_definitions.json
 cppn-system/*
 custom-tests/*
 icmap-elites/estimators_perf.log
