@@ -521,7 +521,7 @@ def serve_layout() -> dbc.Container:
             dbc.Switch(
                 id="voxel-preview-toggle",
                 label="Toggle Voxel Preview",
-                value=False,
+                value=app_settings.voxelised,
             )
         ],
             style={'display': 'inline-flex', 'justify-content': 'center'}
@@ -2287,6 +2287,7 @@ def __toggle_voxelization(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     curr_content = kwargs['curr_content']
     curr_camera = kwargs['curr_camera']
     voxel_display = kwargs['curr_voxel_display']
+    app_settings.voxelised = voxel_display
 
     if app_settings.selected_bins:
         lb = _switch([app_settings.selected_bins[-1]])[0]
@@ -2507,8 +2508,8 @@ def __default(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
                                               metric_name=kwargs['metric_name'],
                                               method_name=kwargs['method_name']),
         'content-plot.figure': _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None)
+                                                  bin_idx=_switch([app_settings.selected_bins[-1]])[0] if app_settings.selected_bins else None,
+                                                  pop='feasible' if kwargs['pop_name'] == 'Feasible' else 'infeasible')
     }
 
 
@@ -2882,8 +2883,8 @@ def general_callback(curr_heatmap: Dict[str, Any],
             logging.getLogger('webapp').error(
                 msg=f'[{__name__}.general_callback] Unrecognized {event_trig=}. No operations have been applied!')
     
-    vars = locals()
-
+    vars = locals()    
+    
     output = {
         'heatmap-plot.figure': curr_heatmap,
         'content-plot.figure': curr_content,
