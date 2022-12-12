@@ -1963,29 +1963,38 @@ def __reset(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
         Dict[str, Any]: The updated application components.
     """
     global app_settings
-    global n_spaceships_inspected
-    global time_elapsed_emitter
-    global population_complexity
-    global n_solutions_feas
-    global n_solutions_infeas
+
+    voxel_display = kwargs['curr_voxel_display']
 
     logging.getLogger('webapp').info(
         msg='Started resetting all bins (this may take a while)...')
     app_settings.current_mapelites.reset()
-    logging.getLogger('webapp').info(msg='Reset completed.')
     app_settings.gen_counter = 0
-    app_settings.selected_bins = []
     _update_base_color(color=base_color)
+    # app_settings.selected_bins = []
+    valid_bins = [b.bin_idx for b in app_settings.current_mapelites._valid_bins()]
+    (j, i) = valid_bins[np.random.choice(len(valid_bins))]
+    app_settings.selected_bins = [(i, j)]
+    curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
+                                      bin_idx=(j, i),
+                                      pop='feasible' if kwargs['pop_name'] == 'Feasible' else 'infeasible',
+                                      camera=None,
+                                      show_voxel=voxel_display)
+    elite = get_elite(mapelites=app_settings.current_mapelites,
+                      bin_idx=_switch([app_settings.selected_bins[-1]])[0],
+                      pop='feasible' if kwargs['pop_name'] == 'Feasible' else 'infeasible')
+    cs_string = elite.string
+    cs_properties = get_properties_table(cs=elite)
+    logging.getLogger('webapp').info(msg='Reset completed.')
 
     return {
         'heatmap-plot.figure': _build_heatmap(mapelites=app_settings.current_mapelites,
                                               pop_name=kwargs['pop_name'],
                                               metric_name=kwargs['metric_name'],
                                               method_name=kwargs['method_name']),
-        'content-plot.figure': _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None),
-        'spaceship-properties.children': get_properties_table(cs=None)
+        'content-plot.figure': curr_content,
+        'content-string.value': cs_string,
+        'spaceship-properties.children': cs_properties,
     }
 
 
