@@ -847,7 +847,7 @@ def serve_layout() -> dbc.Container:
                     html.Br(),
                     dbc.Switch(id='unsaferules-mode-toggle',
                                label='Toggle Safe Mode',
-                               value=True)
+                               value=app_settings.safe_mode)
                 ],
                     width=6)],
                 id='unsafemode-div',
@@ -1885,7 +1885,6 @@ def __apply_step(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     cs_string = kwargs['cs_string']
     curr_content = kwargs['curr_content']
     curr_heatmap = kwargs['curr_heatmap']
-    eoe_modal_show = kwargs['eoe_modal_show']
     nbs_err_modal_show = kwargs['nbs_err_modal_show']
     dlbtn_label = kwargs['dlbtn_label']
     curr_camera = kwargs['curr_camera']
@@ -1947,7 +1946,6 @@ def __apply_step(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'content-plot.figure': curr_content,
         'content-string.value': cs_string,
-        'eoe-modal.is_open': eoe_modal_show,
         'heatmap-plot.figure': curr_heatmap,
         'nbs-err-modal.is_open': nbs_err_modal_show,
         'spaceship-properties.children': cs_properties,
@@ -2538,6 +2536,7 @@ def __toggle_unsafe_mode(**kwargs) -> Dict[str, Any]:
     logging.getLogger('webapp').info(msg='Reset completed.')
     app_settings.gen_counter = 0
     app_settings.selected_bins = []
+    app_settings.safe_mode = not curr_unsafemode
     
     return {
         'sm-modal.is_open': False,
@@ -2799,15 +2798,10 @@ def general_callback(curr_heatmap: Dict[str, Any],
         qs_um_modal_show (bool): Whether the "Quickstart" modal (for the user mode) is currently displayed.
         cm_modal_show (bool): Whether the "Privacy Policy" modal is currently displayed.
         nbs_err_modal_show (bool): Whether the "Warning" modal is currently displayed.
-        eoe_modal_show (bool): Whether the "End of Generation" modal is currently displayed.
-        eous_modal_show (bool): Whether the "End of User Study" modal is currently displayed.
         rand_step_btn_style (Dict[str, str]): The CSS style of the "Evolve from Random Spaceship" button.
         reset_btn_style (Dict[str, str]): The CSS style of the "Reinitialize Population" button.
-        exp_progress_style (Dict[str, str]): The CSS style of the "Spaceships Generation Progress" progress bar container.
-        study_style (Dict[str, str]): The CSS style of the "Current Iteration" progress bar container.
         dlbtn_label (str): The current label of the spaceship download button.
         curr_legend (List[Any]): The current spaceship preview legend.
-        eus_modal_show (bool): Whether the "Quit User Study" modal is currently displayed.
         color (str): The currently picked spaceship base blocks color.
         curr_camera (Dict[str, str]): The current spaceship preview plot camera position.
         curr_voxel_display (bool): Whether the spaceship preview plot currently uses voxels.
@@ -2857,8 +2851,6 @@ def general_callback(curr_heatmap: Dict[str, Any],
         nbs_btn (int): The number of button clicks.
         color_btn (int): The number of button clicks.
         qs_btn (int): The number of button clicks.
-        qus_btn (int): The number of button clicks.
-        qus_y_btn (int): The number of button clicks.
         switch_voxel_display (bool): The new value.
 
     Returns:

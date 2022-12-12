@@ -100,6 +100,7 @@ class AppSettings:
         self.app_mode: AppMode = None
         self.emitter_steps: int = N_EMITTER_STEPS
         self.symmetry: Optional[str] = None
+        self.safe_mode: bool = True
 
     def initialize(self,
                    mapelites: MAPElites,

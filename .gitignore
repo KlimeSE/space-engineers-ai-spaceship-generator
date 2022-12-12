@@ -12,3 +12,4 @@ PCGSEPy.egg-info/*
 build/*
 dist/*
 *.exe
+*.log
