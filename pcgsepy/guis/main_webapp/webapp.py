@@ -83,6 +83,9 @@ struct_sizes: Dict[int, str] = {1: 'Small',
                                 5: 'Large'}
 
 
+first_launch: bool = True
+
+
 app_settings = AppSettings()
 
 
@@ -2857,6 +2860,7 @@ def general_callback(curr_heatmap: Dict[str, Any],
         Tuple[Any, ...]: _description_
     """
     global app_settings
+    global first_launch
 
     ctx = dash.callback_context
 
@@ -2865,6 +2869,10 @@ def general_callback(curr_heatmap: Dict[str, Any],
     else:
         event_trig = ctx.triggered[0]['prop_id'].split('.')[0]
 
+    if event_trig is None and first_launch:
+        event_trig = 'reset-btn'
+        first_launch = False
+    
     if event_trig not in triggers_map:
         try:
             import ast
