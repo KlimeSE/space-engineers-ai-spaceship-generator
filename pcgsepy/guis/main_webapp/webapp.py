@@ -1889,7 +1889,6 @@ def __apply_step(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     curr_content = kwargs['curr_content']
     curr_heatmap = kwargs['curr_heatmap']
     nbs_err_modal_show = kwargs['nbs_err_modal_show']
-    dlbtn_label = kwargs['dlbtn_label']
     curr_camera = kwargs['curr_camera']
     voxel_display = kwargs['curr_voxel_display']
 
@@ -1951,8 +1950,7 @@ def __apply_step(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
         'content-string.value': cs_string,
         'heatmap-plot.figure': curr_heatmap,
         'nbs-err-modal.is_open': nbs_err_modal_show,
-        'spaceship-properties.children': cs_properties,
-        'download-btn.children': dlbtn_label
+        'spaceship-properties.children': cs_properties
     }
 
 
@@ -2637,7 +2635,6 @@ triggers_map = {
               Output("nbs-err-modal", "is_open"),
               Output("rand-step-btn-div", "style"),
               Output("reset-btn-div", "style"),
-              Output('download-btn', 'children'),
               Output('content-legend-div', 'children'),
               Output('emitter-dropdown', 'label'),
               Output('sm-modal', 'is_open'),
@@ -2664,7 +2661,6 @@ triggers_map = {
               State("nbs-err-modal", "is_open"),
               State("rand-step-btn-div", "style"),
               State("reset-btn-div", "style"),
-              State('download-btn', 'children'),
               State('content-legend-div', 'children'),
               State('color-picker', 'value'),
               State("content-plot", "relayoutData"),
@@ -2708,7 +2704,6 @@ triggers_map = {
               Input('emitter-knn', 'n_clicks'),
               Input('emitter-linkernel', 'n_clicks'),
               Input('emitter-rbfkernel', 'n_clicks'),
-              Input("download-btn", "n_clicks"),
               Input('popdownload-btn', 'n_clicks'),
               Input('popupload-data', 'filename'),
               Input('symmetry-none', 'n_clicks'),
@@ -2736,7 +2731,6 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      nbs_err_modal_show: bool,
                      rand_step_btn_style: Dict[str, str],
                      reset_btn_style: Dict[str, str],
-                     dlbtn_label: str,
                      curr_legend: List[Any],
                      color: str,
                      curr_camera: Dict[str, str],
@@ -2813,7 +2807,6 @@ def general_callback(curr_heatmap: Dict[str, Any],
         nbs_err_modal_show (bool): Whether the "Warning" modal is currently displayed.
         rand_step_btn_style (Dict[str, str]): The CSS style of the "Evolve from Random Spaceship" button.
         reset_btn_style (Dict[str, str]): The CSS style of the "Reinitialize Population" button.
-        dlbtn_label (str): The current label of the spaceship download button.
         curr_legend (List[Any]): The current spaceship preview legend.
         color (str): The currently picked spaceship base blocks color.
         curr_camera (Dict[str, str]): The current spaceship preview plot camera position.
@@ -2913,7 +2906,6 @@ def general_callback(curr_heatmap: Dict[str, Any],
         'nbs-err-modal.is_open': nbs_err_modal_show,
         'rand-step-btn-div.style': rand_step_btn_style,
         'reset-btn-div.style': reset_btn_style,
-        'download-btn.children': dlbtn_label,
         'content-legend-div.children': curr_legend,
         'emitter-dropdown.label': emitter_name,
         'sm-modal.is_open': False,
