@@ -16,6 +16,7 @@ base_dependencies = [
     "dash-core-components >= 2.0.0",
     "dash-html-components >= 2.0.0",
     "kaleido == 0.0.1",
+    "joblib == 1.2.0",
     "matplotlib >= 3.5.1",
     "numpy >= 1.22.3",
     "pandas >= 1.4.2",

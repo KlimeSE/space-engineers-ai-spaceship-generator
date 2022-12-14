@@ -1,0 +1,61 @@
+.title {
+    padding: 20px;
+    text-align: center;
+}
+.page-description {
+    padding: 10px;
+    text-align: left;
+}
+.header {
+    background-image: linear-gradient(#464d55, #222222);
+    color: rgb(238, 238, 238);
+}
+.footer {
+    background-image: linear-gradient(#222222, #464d55);
+    color: #EEEEEE;
+}
+.section-title {
+    text-align: center;
+}
+.content-string-area {
+    height: 200px;
+}
+.log-area {
+    height: 200px;
+}
+.rules-area {
+    height: 600px;
+}
+.button-fullsize {
+    width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    display: block;
+    text-overflow: ellipsis;
+    text-align: center;
+}
+.spacer {
+    margin-top: 1%;
+}
+.container {
+    display: grid;
+}
+.content, .overlay {
+    position: relative;
+    grid-area: 1 / 1;
+}
+.help {
+    cursor: help
+}
+.upload {
+    text-align: center;
+    display: inline-flex;
+    flex-wrap: nowrap;
+    flex-direction: column-reverse;
+    justify-content: center;
+    align-items: center;
+    border: deepskyblue;
+    border-width: thick;
+    border-style: dotted;
+    border-radius: 10%;
+}

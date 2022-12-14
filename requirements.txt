@@ -4,6 +4,7 @@ dash-bootstrap-components
 dash-core-components
 dash-html-components
 kaleido
+joblib
 matplotlib
 numpy
 pandas
