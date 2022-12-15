@@ -29,13 +29,11 @@
 <pre><code class="python">import json
 import logging
 import os
-import random
 import sys
 import time
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
-from zipfile import ZipFile
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from pcgsepy.guis.voxel import VoxelData
 
@@ -54,19 +52,15 @@ from dash.dependencies import Input, Output, State
 from pcgsepy.common.api_call import block_definitions
 from pcgsepy.common.jsonifier import json_dumps
 from pcgsepy.common.vecs import Vec
-from pcgsepy.config import (MY_EMITTERS, N_EMITTER_STEPS, N_GENS_ALLOWED)
-from pcgsepy.guis.main_webapp.modals_msgs import (end_of_experiment,
-                                                  end_of_userstudy,
-                                                  no_selection_error,
-                                                  privacy_policy_body,
-                                                  privacy_policy_question,
+from pcgsepy.guis.main_webapp.modals_msgs import (no_selection_error,
                                                   spaceship_population_help,
                                                   spaceship_preview_help,
                                                   download_help,
-                                                  user_study_quit_msg)
-from pcgsepy.guis.utils import AppMode, AppSettings, DashLoggerHandler, Metric, Semaphore
-from pcgsepy.hullbuilder import HullBuilder
-from pcgsepy.lsystem.rules import StochasticRules
+                                                  toggle_safe_rules_off_msg,
+                                                  toggle_safe_rules_on_msg)
+from pcgsepy.guis.utils import AppMode, AppSettings, DashLoggerHandler, Semaphore
+from pcgsepy.hullbuilder import HullBuilder, enforce_symmetry
+from pcgsepy.lsystem.rules import RuleMaker, StochasticRules
 from pcgsepy.lsystem.solution import CandidateSolution
 from pcgsepy.mapelites.bin import MAPBin
 from pcgsepy.mapelites.emitters import (ContextualBanditEmitter, Emitter,
@@ -80,6 +74,7 @@ from tqdm import trange
 
 
 dashLoggerHandler = DashLoggerHandler()
+dashLoggerHandler.addFilter(lambda record: record.levelno &gt;= logging.INFO)
 logging.getLogger(&#39;webapp&#39;).addHandler(dashLoggerHandler)
 
 
@@ -116,33 +111,10 @@ struct_sizes: Dict[int, str] = {1: &#39;Small&#39;,
                                 5: &#39;Large&#39;}
 
 
+first_launch: bool = True
+
+
 app_settings = AppSettings()
-
-
-n_spaceships_inspected = Metric(name=&#39;n_spaceships_inspected&#39;,
-                                emitters=app_settings.my_emitterslist,
-                                exp_n=app_settings.exp_n)
-time_elapsed_emitter = Metric(name=&#39;time_elapsed_emitter&#39;,
-                              emitters=app_settings.my_emitterslist,
-                              exp_n=app_settings.exp_n,
-                              multiple_values=True)
-population_complexity = Metric(name=&#39;population_complexity&#39;,
-                               emitters=app_settings.my_emitterslist,
-                               exp_n=app_settings.exp_n,
-                               multiple_values=True)
-n_solutions_feas = Metric(name=&#39;n_solutions_feas&#39;,
-                          emitters=app_settings.my_emitterslist,
-                          exp_n=app_settings.exp_n)
-n_solutions_infeas = Metric(name=&#39;n_solutions_infeas&#39;,
-                            emitters=app_settings.my_emitterslist,
-                            exp_n=app_settings.exp_n)
-
-
-all_metrics = [n_spaceships_inspected,
-               time_elapsed_emitter,
-               population_complexity,
-               n_solutions_feas,
-               n_solutions_infeas]
 
 
 download_semaphore = Semaphore(locked=True)
@@ -188,7 +160,7 @@ def get_properties_table(cs: Optional[CandidateSolution] = None) -&gt; dbc.Table
         dbc.Table: The table with the properties.
     &#34;&#34;&#34;
     size = str(cs.size) if cs else &#39;-&#39;
-    nblocks = cs.n_blocks if cs else &#39;-&#39;
+    nblocks = len(cs.content._blocks) if cs else &#39;-&#39;  # cs.n_blocks does not take into account hull
     vol = cs.content.total_volume if cs else &#39;-&#39;
     mass = cs.content.mass if cs else &#39;-&#39;
     struct_size = struct_sizes[cs.content.grid_size] if cs else &#39;-&#39;
@@ -248,29 +220,6 @@ def get_content_legend() -&gt; dbc.Row:
         justify=&#39;start&#39;)
 
 
-def _get_emitter() -&gt; Emitter:
-    &#34;&#34;&#34;Get the emitter from the `.json` file name.
-
-    Raises:
-        ValueError: Raised if the emitter type is not amongst the valid ones.
-
-    Returns:
-        Emitter: The emitter.
-    &#34;&#34;&#34;
-    curr_emitter = app_settings.my_emitterslist[app_settings.exp_n].replace(&#39;.json&#39;, &#39;&#39;).split(&#39;_&#39;)[1]
-    if curr_emitter == &#39;human&#39;:
-        return HumanEmitter()
-    elif curr_emitter == &#39;random&#39;:
-        return RandomEmitter()
-    elif curr_emitter == &#39;greedy&#39;:
-        return GreedyEmitter()
-    elif curr_emitter == &#39;contbandit&#39;:
-        return ContextualBanditEmitter()
-    else:
-        raise ValueError(
-            f&#39;Unexpected emitter type: {curr_emitter} (from &#34;{app_settings.my_emitterslist[app_settings.exp_n]}&#34;&#39;)
-
-
 def serve_layout() -&gt; dbc.Container:
     &#34;&#34;&#34;Generate the layout of the application.
 
@@ -278,15 +227,6 @@ def serve_layout() -&gt; dbc.Container:
         dbc.Container: The layout.
     &#34;&#34;&#34;
     global app_settings
-
-    if not app_settings.app_mode:
-        app_settings.consent_ok = False if app_settings.app_mode == AppMode.DEV else None
-
-    # check if user has completed the user study already
-    if not app_settings.app_mode:
-        if os.path.isfile(os.path.join(curr_folder, &#39;.userstudyover&#39;)):
-            app_settings.consent_ok = None
-            app_settings.app_mode = AppMode.USER
 
     webapp_info_file = &#39;./assets/webapp_help_dev.md&#39; if app_settings.app_mode == AppMode.DEV else &#39;./assets/webapp_info.md&#39;
     with open(webapp_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
@@ -296,64 +236,9 @@ def serve_layout() -&gt; dbc.Container:
     with open(algo_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
         algo_info_str = f.read()
 
-    quickstart_info_file = &#39;./assets/quickstart.md&#39;
-    with open(quickstart_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
-        quickstart_info_str = f.read()
-
     quickstart_usermode_info_file = &#39;./assets/quickstart_usermode.md&#39;
     with open(quickstart_usermode_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
         quickstart_usermode_info_str = f.read()
-
-    if app_settings.rngseed is None:
-        app_settings.rngseed = uuid.uuid4().int
-        logging.getLogger(&#39;webapp&#39;).info(
-            msg=f&#39;Your ID is {app_settings.rngseed}.&#39;)
-    if app_settings.app_mode is None:
-        random.seed(app_settings.rngseed)
-        app_settings.my_emitterslist = MY_EMITTERS.copy()
-        random.shuffle(app_settings.my_emitterslist)
-        app_settings.current_mapelites.emitter = _get_emitter()
-        logging.getLogger(&#39;webapp&#39;).debug(
-            msg=f&#39;[{__name__}.set_app_layout] {app_settings.app_mode=} {app_settings.rngseed=}; {app_settings.my_emitterslist=}.&#39;)
-
-    consent_dialog = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Privacy Policy&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(children=[
-            html.Div(id=&#39;body-text&#39;,
-                     children=[
-                         dcc.Markdown(privacy_policy_body,
-                                      link_target=&#34;_blank&#34;,
-                                      style={&#39;text-align&#39;: &#39;justify&#39;}),
-                         dcc.Markdown(privacy_policy_question,
-                                      style={&#39;text-align&#39;: &#39;center&#39;})
-                     ]),
-            html.Div(id=&#39;consent-body-loading&#39;,
-                     children=[])
-        ]),
-        dbc.ModalFooter(children=[
-            dbc.Button(&#34;No&#34;,
-                       disabled=False,
-                       id=&#34;consent-no&#34;,
-                       color=&#34;danger&#34;,
-                       className=&#34;ms-auto&#34;,
-                       n_clicks=0,
-                       style={&#39;width&#39;: &#39;49%&#39;}),
-            dbc.Button(&#34;Yes, and take me to the questionnaire&#34;,
-                       disabled=False,
-                       id=&#34;consent-yes&#34;,
-                       color=&#34;success&#34;,
-                       className=&#34;ms-auto&#34;,
-                       n_clicks=0,
-                       style={&#39;width&#39;: &#39;49%&#39;})
-        ])
-    ],
-        id=&#34;consent-modal&#34;,
-        centered=True,
-        backdrop=&#34;static&#34;,
-        keyboard=False,
-        is_open=False)
 
     webapp_info_modal = dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle(&#34;App Info&#34;),
@@ -378,21 +263,6 @@ def serve_layout() -&gt; dbc.Container:
                                    mathjax=True))
     ],
         id=&#39;algo-info-modal&#39;,
-        centered=True,
-        backdrop=&#39;static&#39;,
-        is_open=False,
-        scrollable=True,
-        size=&#39;lg&#39;)
-
-    quickstart_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Tutorial&#34;),
-                        style={&#39;flex-direction&#39;: &#39;column-reverse&#39;},
-                        close_button=True),
-        dbc.ModalBody(dcc.Markdown(quickstart_info_str,
-                                   link_target=&#34;_blank&#34;,
-                                   style={&#39;text-align&#39;: &#39;justify&#39;}))
-    ],
-        id=&#39;quickstart-modal&#39;,
         centered=True,
         backdrop=&#39;static&#39;,
         is_open=False,
@@ -429,36 +299,6 @@ def serve_layout() -&gt; dbc.Container:
         centered=True,
         backdrop=True,
         is_open=False)
-
-    end_of_experiment_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;End of Generation&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(dcc.Markdown(end_of_experiment,
-                                   style={&#39;text-align&#39;: &#39;justify&#39;}))
-    ],
-        id=&#39;eoe-modal&#39;,
-        centered=True,
-        backdrop=True,
-        is_open=False,
-        scrollable=True)
-
-    end_of_userstudy_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;End of User Study&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(children=[
-            dcc.Markdown(end_of_userstudy,
-                         style={&#39;text-align&#39;: &#39;justify&#39;}),
-            html.Div(id=&#39;eous-body-loading&#39;,
-                     children=[])
-        ])
-    ],
-        id=&#39;eous-modal&#39;,
-        centered=True,
-        backdrop=True,
-        is_open=False,
-        scrollable=True)
 
     heatmap_help_modal = dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle(&#34;Spaceship Population Help&#34;),
@@ -499,33 +339,34 @@ def serve_layout() -&gt; dbc.Container:
         is_open=False,
         scrollable=True)
 
-    exit_userstudy_modal = dbc.Modal(children=[
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Quit User Study?&#34;),
+    toggle_unsaferules_modal = dbc.Modal(children=[
+        dbc.ModalHeader(dbc.ModalTitle(&#34;Turn off safe mode?&#34;),
+                        id=&#39;sm-modal-title&#39;,
                         style={&#39;justify-content&#39;: &#39;center&#39;},
                         close_button=True),
         dbc.ModalBody(children=[
-            dcc.Markdown(user_study_quit_msg,
+            dcc.Markdown(toggle_safe_rules_off_msg,
+                         id=&#39;sm-modal-body&#39;,
                          style={&#39;text-align&#39;: &#39;justify&#39;}),
-            html.Div(id=&#39;eus-body-loading&#39;,
+            html.Div(id=&#39;tsm-body-loading&#39;,
                      children=[])
         ]),
         dbc.ModalFooter(children=[dbc.Button(&#34;Yes&#34;,
-                                             id=&#34;qus-y-btn&#34;,
+                                             id=&#34;tsrm-y-btn&#34;,
                                              color=&#34;primary&#34;,
                                              className=&#34;ms-auto&#34;,
                                              n_clicks=0,
                                              style={&#39;width&#39;: &#39;100%&#39;})])
     ],
-        id=&#39;eus-modal&#39;,
+        id=&#39;sm-modal&#39;,
         centered=True,
-        backdrop=True,
+        backdrop=&#39;static&#39;,
         is_open=False,
+        keyboard=False,
         scrollable=True)
 
     modals = html.Div(children=[
-        consent_dialog, webapp_info_modal, algo_info_modal, quickstart_modal, quickstart_usermode_modal,
-        no_bins_selected_modal, end_of_experiment_modal, end_of_userstudy_modal, exit_userstudy_modal,
-        heatmap_help_modal, content_help_modal, download_help_modal
+        webapp_info_modal, algo_info_modal, quickstart_usermode_modal, no_bins_selected_modal, heatmap_help_modal, content_help_modal, download_help_modal, toggle_unsaferules_modal
     ])
 
     header = dbc.Row(children=[
@@ -570,22 +411,6 @@ def serve_layout() -&gt; dbc.Container:
         className=&#39;header&#39;,
         style={&#39;content-justify&#39;: &#39;center&#39;})
 
-    quit_user_study_div = html.Div(
-        dbc.Row(
-            dbc.Col(children=[
-                    dbc.Button(&#39;Quit User Study&#39;,
-                               id=&#39;qus-btn&#39;,
-                               className=&#39;button-fullsize&#39;,
-                               color=&#39;danger&#39;),
-                    html.Br(),
-                    html.Br()],
-                    width={&#39;size&#39;: 2, &#39;offset&#39;: 5}),
-            id=&#39;qus-div&#39;,
-            style={
-                &#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USERSTUDY else hidden_style
-        )
-    )
-
     exp_progress = html.Div(
         id=&#39;study-progress-div&#39;,
         children=[
@@ -601,22 +426,6 @@ def serve_layout() -&gt; dbc.Container:
                     width={&#39;size&#39;: 12, &#39;offset&#39;: 0},
                     style={&#39;text-align&#39;: &#39;center&#39;},
                     align=&#39;center&#39;)
-            ),
-
-            dbc.Row(
-                dbc.Col(children=[
-                    dbc.Label(f&#39;Spaceships Generation Progress&#39;,
-                              style={&#39;font-size&#39;: &#39;large&#39;}),
-                    dbc.Progress(id=&#34;exp-progress&#34;,
-                                 color=&#39;success&#39;,
-                                 striped=False,
-                                 animated=False)
-                ],
-                    width={&#39;size&#39;: 12, &#39;offset&#39;: 0},
-                    style={&#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode is None else {
-                        **{&#39;text-align&#39;: &#39;center&#39;}, **hidden_style},
-                    align=&#39;center&#39;,
-                    id=&#39;exp-progress-div&#39;)
             )
         ])
 
@@ -740,7 +549,7 @@ def serve_layout() -&gt; dbc.Container:
             dbc.Switch(
                 id=&#34;voxel-preview-toggle&#34;,
                 label=&#34;Toggle Voxel Preview&#34;,
-                value=False,
+                value=app_settings.voxelised,
             )
         ],
             style={&#39;display&#39;: &#39;inline-flex&#39;, &#39;justify-content&#39;: &#39;center&#39;}
@@ -804,7 +613,8 @@ def serve_layout() -&gt; dbc.Container:
                                 fullscreen=False,
                                 color=&#39;#eeeeee&#39;,
                                 type=&#39;default&#39;,
-                                style={&#39;justify-content&#39;: &#39;center&#39;})
+                                style={&#39;justify-content&#39;: &#39;center&#39;}),
+                    html.Br()
                 ],
                     width={&#39;size&#39;: 6, &#39;offset&#39;: 3},
                     style={&#39;text-align&#39;: &#39;center&#39;, &#39;justify-content&#39;: &#39;center&#39;})
@@ -900,12 +710,15 @@ def serve_layout() -&gt; dbc.Container:
         children=[
             html.H4(children=&#39;Experiment Settings&#39;,
                     className=&#39;section-title&#39;),
-            html.Br(),
             html.Div(children=[
-                html.P(children=f&#39;Selected bin(s): {app_settings.selected_bins}&#39;,
-                       id=&#39;selected-bin&#39;)
-            ]),
-            html.Br(),
+                 html.Br(),
+                    html.Div(children=[
+                        html.P(children=f&#39;Selected bin(s): {app_settings.selected_bins}&#39;,
+                            id=&#39;selected-bin&#39;)
+                    ]),
+                    html.Br(),
+                ],
+                    style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Feature Descriptors (X, Y):&#39;),
                 dbc.DropdownMenu(label=app_settings.current_mapelites.b_descs[0].name,
@@ -922,7 +735,7 @@ def serve_layout() -&gt; dbc.Container:
                                  id=&#39;b1-dropdown&#39;)
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Toggle L-system Modules:&#39;),
                 dbc.Checklist(id=&#39;lsystem-modules&#39;,
@@ -933,7 +746,7 @@ def serve_layout() -&gt; dbc.Container:
                               inline=True,
                               switch=True)
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Fitness Weights:&#39;),
@@ -956,7 +769,7 @@ def serve_layout() -&gt; dbc.Container:
                     ]) for i, f in enumerate(app_settings.current_mapelites.feasible_fitnesses)
                 ])
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Select Emitter:&#39;),
@@ -984,7 +797,7 @@ def serve_layout() -&gt; dbc.Container:
                                  id=&#39;emitter-dropdown&#39;)
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Enforce Symmetry:&#39;),
                 dbc.DropdownMenu(label=&#39;None&#39;,
@@ -994,20 +807,12 @@ def serve_layout() -&gt; dbc.Container:
                                      dbc.DropdownMenuItem(
                                          &#39;X-axis&#39;, id=&#39;symmetry-x&#39;),
                                      dbc.DropdownMenuItem(
-                                         &#39;Y-axis&#39;, id=&#39;symmetry-y&#39;),
-                                     dbc.DropdownMenuItem(
                                          &#39;Z-axis&#39;, id=&#39;symmetry-z&#39;),
                                  ],
-                                 id=&#39;symmetry-dropdown&#39;,
-                                 style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
-                dbc.RadioItems(id=&#39;symmetry-radio&#39;,
-                               options=[
-                                   {&#39;label&#39;: &#39;Upper&#39;, &#39;value&#39;: &#39;Upper&#39;},
-                                   {&#39;label&#39;: &#39;Lower&#39;, &#39;value&#39;: &#39;Lower&#39;}
-                               ],
-                               value=&#39;Upper&#39;)
+                                 id=&#39;symmetry-dropdown&#39;),
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;},
+                id=&#39;symmetry-div&#39;,
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Save/Load Population:&#39;),
@@ -1021,9 +826,10 @@ def serve_layout() -&gt; dbc.Container:
                 ),
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style)
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style})
         ],
-        style={} if app_settings.app_mode == AppMode.DEV else hidden_style)
+        style={&#39;justify-content&#39;: &#39;center&#39;},
+        id=&#39;experiment-settings-div&#39;)
 
     experiment_controls = html.Div(
         children=[
@@ -1044,7 +850,7 @@ def serve_layout() -&gt; dbc.Container:
                                className=&#39;button-fullsize&#39;)
                 ],
                     id=&#39;rand-step-btn-div&#39;,
-                    style={} if app_settings.app_mode == AppMode.USER else hidden_style,
+                    # style={} if app_settings.app_mode == AppMode.USER else hidden_style,
                     width=6)
             ],
                 style={&#39;justify-content&#39;: &#39;center&#39;, &#39;flex-wrap&#39;: &#39;inherit&#39;}),
@@ -1060,23 +866,54 @@ def serve_layout() -&gt; dbc.Container:
             dbc.Row(children=[
                 dbc.Col(children=[
                     html.Br(),
+                    dbc.Button(id=&#39;reset-btn&#39;,
+                               children=&#39;Reinitialize Population&#39;,
+                               className=&#39;button-fullsize&#39;)
+                ],
+                    id=&#39;reset-btn-div&#39;,
+                    style={&#39;justify-content&#39;: &#39;center&#39;},
+                    width={&#39;offset&#39;: 3, &#39;size&#39;: 6})]),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    html.Br(),
+                    dbc.Switch(id=&#39;unsaferules-mode-toggle&#39;,
+                               label=&#39;Toggle Safe Mode&#39;,
+                               value=app_settings.safe_mode)
+                ],
+                    width=6)],
+                id=&#39;unsafemode-div&#39;,
+                style={&#39;justify-content&#39;: &#39;center&#39;, &#39;text-align&#39;: &#39;center&#39;}),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    dbc.Label(&#39;Evolution Iterations:&#39;),
+                    dcc.Slider(min=0,
+                            max=10,
+                            step=None,
+                            value=app_settings.emitter_steps,
+                            marks={
+                                0: &#39;0&#39;,
+                                3: &#39;3&#39;,
+                                5: &#39;5&#39;,
+                                7: &#39;7&#39;,
+                                10: &#39;10&#39;
+                                },
+                            tooltip={&#34;placement&#34;: &#34;bottom&#34;,
+                                        &#34;always_visible&#34;: False},
+                            id=&#39;evo-iter-sldr&#39;)
+                    ],
+                    width=6)
+            ],
+                    id=&#39;emitter-steps-div&#39;,
+                    style={&#39;justify-content&#39;: &#39;center&#39;, &#39;text-align&#39;: &#39;center&#39;}),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    html.Br(),
                     dbc.Button(id=&#39;selection-btn&#39;,
                                children=&#39;Toggle Single Bin Selection&#39;,
                                className=&#39;button-fullsize&#39;)
                 ],
                     width=6)],
                 style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
-            dbc.Row(children=[
-                dbc.Col(children=[
-                    html.Br(),
-                    dbc.Button(id=&#39;reset-btn&#39;,
-                               children=&#39;Reinitialize Population&#39;,
-                               className=&#39;button-fullsize&#39;)
-                ],
-                    id=&#39;reset-btn-div&#39;,
-                    style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USER else {
-                        **{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
-                    width={&#39;offset&#39;: 3, &#39;size&#39;: 6})]),
             dbc.Row(children=[
                 dbc.Col(children=[
                     html.Br(),
@@ -1167,9 +1004,6 @@ def serve_layout() -&gt; dbc.Container:
             header,
             dbc.Row(children=[
                 dbc.Row(children=[
-                    quit_user_study_div
-                ]),
-                dbc.Row(children=[
                     dbc.Col(children=[
                         exp_progress,
                         progress
@@ -1231,22 +1065,6 @@ loading_data_component = html.Div(children=[
             style={&#39;justify-content&#39;: &#39;center&#39;, &#39;text-align&#39;: &#39;center&#39;}),
     ])
 ]
-)
-
-
-# clientside callback to open the Google Forms questionnaire on a new page
-app.clientside_callback(
-    &#34;&#34;&#34;
-    function(clicks) {
-        if (clicks) {
-            window.open(&#34;https://forms.gle/gsuajDXUNocZvDzn9&#34;, &#34;_blank&#34;);
-            return 0;
-        }
-    }
-    &#34;&#34;&#34;,
-    Output(&#34;hidden-div&#34;, &#34;n_clicks&#34;),  # super hacky but Dash leaves me no choice
-    Input(&#34;consent-yes&#34;, &#34;n_clicks&#34;),
-    prevent_initial_call=True
 )
 
 
@@ -1403,31 +1221,7 @@ def update_gen_progress(n: int) -&gt; Tuple[int, str]:
     Returns:
         Tuple[int, str]: The current progress value and string percentage representation.
     &#34;&#34;&#34;
-    if app_settings.app_mode == AppMode.USERSTUDY:
-        val = np.round(100 * ((app_settings.gen_counter) / N_GENS_ALLOWED), 2)
-        return val, f&#34;{app_settings.gen_counter} / {N_GENS_ALLOWED}&#34;
-    else:
-        return 100, f&#34;{app_settings.gen_counter}&#34;
-
-
-@app.callback(
-    [Output(&#34;exp-progress&#34;, &#34;value&#34;),
-     Output(&#34;exp-progress&#34;, &#34;label&#34;)],
-    [Input(&#34;interval1&#34;, &#34;n_intervals&#34;)],
-    prevent_initial_call=True
-)
-def update_exp_progress(n: int) -&gt; Tuple[int, str]:
-    &#34;&#34;&#34;Update the `Spaceships Generation Progress` progress bar.
-
-    Args:
-        n (int): Interval time.
-
-    Returns:
-        Tuple[int, str]: The current progress value and string percentage representation.
-    &#34;&#34;&#34;
-    val = min(100, np.round(100 * ((1 + app_settings.exp_n) /
-              len(app_settings.my_emitterslist)), 2))
-    return val, f&#34;{min(app_settings.exp_n + 1, len(app_settings.my_emitterslist))} / {len(app_settings.my_emitterslist)}&#34;
+    return 100, f&#34;{app_settings.gen_counter}&#34;
 
 
 @app.callback(
@@ -1476,25 +1270,36 @@ def download_content(curr_content: Dict[str, Any],
     global download_semaphore
 
     def write_archive(bytes_io):
-        with ZipFile(bytes_io, mode=&#34;w&#34;) as zf:
+        with ZipFile(bytes_io, mode=&#34;w&#34;, compression=ZIP_DEFLATED) as zf:
             # with open(&#39;./assets/thumb.png&#39;, &#39;rb&#39;) as f:
             #     thumbnail_img = f.read()
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Started function, writing zip file...&#39;)
             content_fig = go.Figure(data=curr_content[&#39;data&#39;],
                                     layout=curr_content[&#39;layout&#39;])
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Created thumbnail from plot...&#39;)
             content_fig.update_layout(scene_camera=curr_camera.get(&#39;scene.camera&#39;, None))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Updated thumbnail camera...&#39;)
             thumbnail_img = content_fig.to_image(format=&#34;png&#34;)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Converted to image...&#39;)
             zf.writestr(&#39;thumb.png&#39;, thumbnail_img)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Loaded and saved thumbnail.&#39;)
             elite = get_elite(mapelites=app_settings.current_mapelites,
                               bin_idx=_switch(
                                   [app_settings.selected_bins[-1]])[0],
                               pop=&#39;feasible&#39;)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Loaded elite solution {elite=}.&#39;)
+            if app_settings.symmetry is not None:
+                elite.string = enforce_symmetry(string=elite.string,
+                                                    axis=app_settings.symmetry)
             tmp = CandidateSolution(string=elite.string)
             tmp.ll_string = elite.ll_string
             tmp.base_color = elite.base_color
             app_settings.current_mapelites.lsystem._set_structure(cs=tmp)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Copied threadsafe elite solution, starting hullbuilding...&#39;)
             hullbuilder = HullBuilder(erosion_type=app_settings.current_mapelites.hull_builder.erosion_type,
                                       apply_erosion=True,
                                       apply_smoothing=True)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Added external hull, unlocking semaphore...&#39;)
             download_semaphore.unlock()
             download_semaphore._running = &#39;YES&#39;
             logging.getLogger(&#39;webapp&#39;).debug(
@@ -1504,42 +1309,34 @@ def download_content(curr_content: Dict[str, Any],
             logging.getLogger(&#39;webapp&#39;).debug(
                 f&#39;[{__name__}.write_archive] {tmp.string=}; {tmp.content=}; {tmp.base_color=}&#39;)
             zf.writestr(&#39;bp.sbc&#39;, convert_structure_to_xml(structure=tmp.content,
-                        name=f&#39;My Spaceship ({app_settings.rngseed}) (exp{app_settings.exp_n})&#39;))
+                        name=f&#39;My Spaceship ({app_settings.rngseed})&#39;))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Created game blueprint, saving spaceship string representation...&#39;)
             content_properties = {
                 &#39;string&#39;: tmp.string,
                 &#39;base_color&#39;: tmp.base_color.as_dict()
             }
-            zf.writestr(f&#39;spaceship_{app_settings.rngseed}_exp{app_settings.exp_n}&#39;, json.dumps(
+            zf.writestr(f&#39;spaceship_{app_settings.rngseed}_gen{app_settings.gen_counter}&#39;, json.dumps(
                 content_properties))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Zip file completed and ready to be downloaded.&#39;)
             download_semaphore._running = &#39;NO&#39;
 
     if app_settings.selected_bins:
         logging.getLogger(&#39;webapp&#39;).info(
             f&#39;Your selected spaceship will be downloaded shortly.&#39;)
-        return dcc.send_bytes(write_archive, f&#39;MySpaceship_{app_settings.rngseed}_exp{app_settings.exp_n}_gen{app_settings.gen_counter}.zip&#39;), &#39;\n\n&#39;
+        return dcc.send_bytes(write_archive, f&#39;MySpaceship_{app_settings.rngseed}_gen{app_settings.gen_counter}.zip&#39;), &#39;\n\n&#39;
     else:
         return None, &#39;\n\n&#39;
 
 
 @app.callback(
-    Output(&#34;consent-yes&#34;, &#34;disabled&#34;),
-    Output(&#34;consent-no&#34;, &#34;disabled&#34;),
-    Input(&#34;consent-yes&#34;, &#34;n_clicks&#34;),
-    Input(&#34;consent-no&#34;, &#34;n_clicks&#34;),
+    Output(&#34;evo-iter-sldr&#34;, &#34;value&#34;),
+    Input(&#34;evo-iter-sldr&#34;, &#34;value&#34;),
     prevent_initial_call=True
 )
-def disable_privacy_modal_buttons(ny: int,
-                                  nn: int) -&gt; Tuple[bool, bool]:
-    &#34;&#34;&#34;Disable the privacy modal buttons.
-
-    Args:
-        ny (int): Number of &#34;yes&#34; button clicks.
-        nn (int): Number of &#34;no&#34; button clicks.
-
-    Returns:
-        Tuple[bool, bool]: Both buttons disable value.
-    &#34;&#34;&#34;
-    return True, True
+def change_emitter_steps(n_steps: int) -&gt; Any:
+    logging.getLogger(&#39;webapp&#39;).info(f&#39;Setting evolution iterations to {n_steps}...&#39;)
+    app_settings.emitter_steps = n_steps
+    return n_steps
 
 
 @app.callback(Output(&#39;step-btn&#39;, &#39;disabled&#39;),
@@ -1561,38 +1358,30 @@ def disable_privacy_modal_buttons(ny: int,
               Output(&#39;lsystem-modules&#39;, &#39;options&#39;),
               Output(&#39;emitter-dropdown&#39;, &#39;disabled&#39;),
               Output(&#39;symmetry-dropdown&#39;, &#39;disabled&#39;),
-              Output(&#39;symmetry-radio&#39;, &#39;options&#39;),
               Output(&#39;color-picker&#39;, &#39;disabled&#39;),
               Output(&#39;heatmap-plot-container&#39;, &#39;style&#39;),
               Output({&#39;type&#39;: &#39;fitness-sldr&#39;, &#39;index&#39;: ALL}, &#39;disabled&#39;),
-              Output(&#39;qus-btn&#39;, &#39;disabled&#39;),
               Output(&#39;webapp-quickstart-btn&#39;, &#39;disabled&#39;),
               Output(&#39;webapp-info-btn&#39;, &#39;disabled&#39;),
               Output(&#39;ai-info-btn&#39;, &#39;disabled&#39;),
-              Output(&#39;qus-y-btn&#39;, &#39;disabled&#39;),
-              Output(&#39;consent-body-loading&#39;, &#39;children&#39;),
-              Output(&#39;eous-body-loading&#39;, &#39;children&#39;),
-              Output(&#39;eus-body-loading&#39;, &#39;children&#39;),
+              Output(&#39;tsrm-y-btn&#39;, &#39;disabled&#39;),
+              Output(&#39;tsm-body-loading&#39;, &#39;children&#39;),
               Output(&#39;color-picker-btn&#39;, &#39;disabled&#39;),
               Output(&#39;voxel-preview-toggle&#39;, &#39;disabled&#39;),
+              Output(&#39;unsaferules-mode-toggle&#39;, &#39;disabled&#39;),
+              Output(&#39;evo-iter-sldr&#39;, &#39;disabled&#39;),
 
               State({&#39;type&#39;: &#39;fitness-sldr&#39;, &#39;index&#39;: ALL}, &#39;disabled&#39;),
               State(&#39;method-radio&#39;, &#39;options&#39;),
               State(&#39;lsystem-modules&#39;, &#39;options&#39;),
-              State(&#39;symmetry-radio&#39;, &#39;options&#39;),
-              State(&#39;consent-body-loading&#39;, &#39;children&#39;),
-              State(&#39;eous-body-loading&#39;, &#39;children&#39;),
-              State(&#39;eus-body-loading&#39;, &#39;children&#39;),
+              State(&#39;tsm-body-loading&#39;, &#39;children&#39;),
 
               Input(&#39;interval2&#39;, &#39;n_intervals&#39;),
               )
 def interval_updates(fdis: List[Dict[str, bool]],
                      ms: List[Dict[str, str]],
                      lsysms: List[Dict[str, str]],
-                     symms: List[Dict[str, str]],
-                     consent_loading_data_children: List[Any],
-                     eous_loading_data_children: List[Any],
-                     eus_loading_data_children: List[Any],
+                     tsm_loading_data_children: List[Any],
                      ni: int) -&gt; Tuple[Union[bool, Dict[str, Any], List[Any]], ...]:
     &#34;&#34;&#34;Update the `disable` property of components at every interval.
 
@@ -1600,10 +1389,6 @@ def interval_updates(fdis: List[Dict[str, bool]],
         fdis (List[Dict[str, bool]]): The list of fitness sliders.
         ms (List[Dict[str, str]]): The list of plotting methods.
         lsysms (List[Dict[str, str]]): The list of L-system modules.
-        symms (List[Dict[str, str]]): The list of symmetry options.
-        consent_loading_data_children (List[Any]): The &#34;loading data&#34; area of the consent modal.
-        eous_loading_data_children (List[Any]): The &#34;loading data&#34; area of the &#34;end of user study&#34; modal.
-        eus_loading_data_children (List[Any]): The &#34;loading data&#34; area of the &#34;quit user study&#34; modal.
         ni (int): The interval value.
 
     Returns:
@@ -1617,13 +1402,11 @@ def interval_updates(fdis: List[Dict[str, bool]],
 
     for o in ms:
         o[&#39;disabled&#39;] = running_something
-    for o in symms:
-        o[&#39;disabled&#39;] = running_something
     for o in lsysms:
         o[&#39;disabled&#39;] = running_something
 
     btns = {
-        &#39;step-btn.disabled&#39;: running_something or (app_settings.app_mode == AppMode.USERSTUDY and app_settings.gen_counter &gt;= N_GENS_ALLOWED),
+        &#39;step-btn.disabled&#39;: running_something ,
         &#39;download-btn.disabled&#39;: running_something or download_semaphore._running == &#39;YES&#39;,
         &#39;popdownload-btn.disabled&#39;: running_something,
         &#39;rand-step-btn.disabled&#39;: running_something,
@@ -1642,7 +1425,6 @@ def interval_updates(fdis: List[Dict[str, bool]],
         &#39;lsystem-modules.options&#39;: lsysms,
         &#39;emitter-dropdown.disabled&#39;: running_something,
         &#39;symmetry-dropdown.disabled&#39;: running_something,
-        &#39;symmetry-radio.options&#39;: symms,
         &#39;color-picker.disabled&#39;: running_something,
         &#39;heatmap-plot-container.style&#39;: {&#39;visibility&#39;: &#39;visible&#39; if running_something else &#39;hidden&#39;,
                                          &#39;display&#39;: &#39;grid&#39; if running_something else &#39;none&#39;,
@@ -1650,32 +1432,21 @@ def interval_updates(fdis: List[Dict[str, bool]],
                                          &#39;pointer-events&#39;: &#39;auto&#39;,
                                          &#39;z-index&#39;: 1 if running_something else -1},
         &#39;fitness-sldr.disabled&#39;: [running_something] * len(fdis),
-        &#39;qus-btn.disabled&#39;: running_something,
         &#39;webapp-quickstart-btn.disabled&#39;: running_something,
         &#39;webapp-info-btn.disabled&#39;: running_something,
         &#39;ai-info-btn.disabled&#39;: running_something,
-        &#39;qus-y-btn.disabled&#39;: running_something,
-        &#39;consent-body-loading.children&#39;: [],
-        &#39;eous-body-loading.children&#39;: [],
-        &#39;eus-body-loading.children&#39;: [],
+        &#39;tsrm-y-btn.disabled&#39;: running_something,
+        &#39;tsm-body-loading.children&#39;: [],
         &#39;color-picker-btn.disabled&#39;: running_something,
-        &#39;voxel-preview-toggle.disabled&#39;: running_something
+        &#39;voxel-preview-toggle.disabled&#39;: running_something,
+        &#39;unsaferules-mode-toggle.disabled&#39;: running_something,
+        &#39;evo-iter-sldr.disabled&#39;: running_something,
     }
 
-    if running_something and consent_loading_data_children == []:
-        btns[&#39;consent-body-loading.children&#39;] = loading_data_component
-    elif running_something and consent_loading_data_children != []:
-        btns[&#39;consent-body-loading.children&#39;] = dash.no_update
-
-    if running_something and eous_loading_data_children == []:
-        btns[&#39;eous-body-loading.children&#39;] = loading_data_component
-    elif running_something and eous_loading_data_children != []:
-        btns[&#39;eous-body-loading.children&#39;] = dash.no_update
-
-    if running_something and eus_loading_data_children == []:
-        btns[&#39;eus-body-loading.children&#39;] = loading_data_component
-    elif running_something and eus_loading_data_children != []:
-        btns[&#39;eus-body-loading.children&#39;] = dash.no_update
+    if running_something and tsm_loading_data_children == []:
+        btns[&#39;tsm-body-loading.children&#39;] = loading_data_component
+    elif running_something and tsm_loading_data_children != []:
+        btns[&#39;tsm-body-loading.children&#39;] = dash.no_update
 
     return tuple(btns.values())
 
@@ -1856,6 +1627,19 @@ def _get_elite_content(mapelites: MAPElites,
         elite = get_elite(mapelites=mapelites,
                           bin_idx=bin_idx,
                           pop=pop)
+        if app_settings.symmetry is not None:
+            original_string = elite.string
+            elite._content = None
+            elite.string = enforce_symmetry(string=elite.string,
+                                            axis=app_settings.symmetry)
+            elite = app_settings.current_mapelites.lsystem._set_structure(cs=app_settings.current_mapelites.lsystem._add_ll_strings(cs=elite),
+                                                                          make_graph=False)
+            elite.content._air_gridmask = None
+            if elite.is_feasible:
+                if app_settings.current_mapelites.hull_builder is not None:
+                    app_settings.current_mapelites.hull_builder.add_external_hull(structure=elite.content)
+            elite.string = original_string
+            elite.content.set_color(elite.base_color)
         structure = elite.content
         content = structure.as_grid_array
         arr = np.nonzero(content)
@@ -2031,7 +1815,6 @@ def _get_elite_content(mapelites: MAPElites,
 def _apply_step(mapelites: MAPElites,
                 selected_bins: List[Tuple[int, int]],
                 gen_counter: int,
-                only_human: bool = False,
                 only_emitter: bool = False) -&gt; bool:
     &#34;&#34;&#34;Apply a step of FI-2Pop using the human selection and the PLE.
 
@@ -2048,7 +1831,7 @@ def _apply_step(mapelites: MAPElites,
     global app_settings
     global time_elapsed_emitter
 
-    perc_step = 100 / (1 + N_EMITTER_STEPS)
+    perc_step = 100 / (1 + app_settings.emitter_steps)
 
     valid = True
     if mapelites.enforce_qnt:
@@ -2069,15 +1852,18 @@ def _apply_step(mapelites: MAPElites,
                                                           gen=gen_counter)
         app_settings.step_progress += perc_step
         logging.getLogger(&#39;webapp&#39;).info(
-            msg=f&#39;Completed step {gen_counter + 1} (created {mapelites.n_new_solutions} solutions); running {N_EMITTER_STEPS} additional emitter steps if available...&#39;)
+            msg=f&#39;Completed step {gen_counter + 1} (created {mapelites.n_new_solutions} solutions); running {app_settings.emitter_steps} additional emitter steps if available...&#39;)
         mapelites.n_new_solutions = 0
-        with trange(N_EMITTER_STEPS, desc=&#39;Emitter steps: &#39;) as iterations:
+        if only_emitter:
+            tmp_emitter = mapelites.emitter
+            mapelites.emitter = RandomEmitter()
+        with trange(app_settings.emitter_steps, desc=&#39;Emitter steps: &#39;) as iterations:
             for _ in iterations:
-                if not only_human:
-                    emitter_time += mapelites.emitter_step(gen=gen_counter)
+                # if not only_human:
+                emitter_time += mapelites.emitter_step(gen=gen_counter)
                 app_settings.step_progress += perc_step
-        if app_settings.app_mode == AppMode.USERSTUDY:
-            time_elapsed_emitter.add(emitter_time)
+        if only_emitter:
+            mapelites.emitter = tmp_emitter
         logging.getLogger(&#39;webapp&#39;).info(
             msg=f&#39;Emitter step(s) completed (created {mapelites.n_new_solutions} solutions).&#39;)
         mapelites.n_new_solutions = 0
@@ -2130,9 +1916,7 @@ def __apply_step(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     cs_string = kwargs[&#39;cs_string&#39;]
     curr_content = kwargs[&#39;curr_content&#39;]
     curr_heatmap = kwargs[&#39;curr_heatmap&#39;]
-    eoe_modal_show = kwargs[&#39;eoe_modal_show&#39;]
     nbs_err_modal_show = kwargs[&#39;nbs_err_modal_show&#39;]
-    dlbtn_label = kwargs[&#39;dlbtn_label&#39;]
     curr_camera = kwargs[&#39;curr_camera&#39;]
     voxel_display = kwargs[&#39;curr_voxel_display&#39;]
 
@@ -2141,20 +1925,12 @@ def __apply_step(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
         res = _apply_step(mapelites=app_settings.current_mapelites,
                           selected_bins=_switch(app_settings.selected_bins),
                           gen_counter=app_settings.gen_counter,
-                          only_human=kwargs[&#39;event_trig&#39;] == &#39;step-btn&#39; and app_settings.app_mode == AppMode.USER,
                           only_emitter=kwargs[&#39;event_trig&#39;] == &#39;rand-step-btn&#39; and app_settings.app_mode == AppMode.USER)
         if res:
             elapsed = time.perf_counter() - s
             new_complexity = app_settings.current_mapelites.population_complexity(
                 pop=&#39;feasible&#39;)
             app_settings.gen_counter += 1
-            # update metrics if user consented to privacy
-            if app_settings.app_mode == AppMode.USERSTUDY:
-                population_complexity.add(new_complexity)
-                n_solutions_feas.add(
-                    float(app_settings.current_mapelites.total_solutions(&#39;feasible&#39;)))
-                n_solutions_infeas.add(
-                    float(app_settings.current_mapelites.total_solutions(&#39;infeasible&#39;)))
             if app_settings.selected_bins:
                 rem_idxs = []
                 for i, b in enumerate(app_settings.selected_bins):
@@ -2184,9 +1960,6 @@ def __apply_step(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
                                           pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;)
                         cs_string = elite.string
                         cs_properties = get_properties_table(cs=elite)
-            # prompt user to download content if reached end of generations
-            if app_settings.app_mode == AppMode.USERSTUDY and app_settings.gen_counter == N_GENS_ALLOWED:
-                eoe_modal_show = True
             # update heatmap
             curr_heatmap = _build_heatmap(mapelites=app_settings.current_mapelites,
                                           pop_name=kwargs[&#39;pop_name&#39;],
@@ -2200,20 +1973,12 @@ def __apply_step(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
             msg=f&#39;Step not applied: no bin(s) selected.&#39;)
         nbs_err_modal_show = True
 
-    if app_settings.app_mode == AppMode.USERSTUDY and app_settings.gen_counter == N_GENS_ALLOWED:
-        if app_settings.exp_n + 1 == len(app_settings.my_emitterslist):
-            dlbtn_label = &#39;Download and Switch to User Mode&#39;
-        else:
-            dlbtn_label = &#39;Download and Start Next Experiment&#39;
-
     return {
         &#39;content-plot.figure&#39;: curr_content,
         &#39;content-string.value&#39;: cs_string,
-        &#39;eoe-modal.is_open&#39;: eoe_modal_show,
         &#39;heatmap-plot.figure&#39;: curr_heatmap,
         &#39;nbs-err-modal.is_open&#39;: nbs_err_modal_show,
-        &#39;spaceship-properties.children&#39;: cs_properties,
-        &#39;download-btn.children&#39;: dlbtn_label
+        &#39;spaceship-properties.children&#39;: cs_properties
     }
 
 
@@ -2224,36 +1989,38 @@ def __reset(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
         Dict[str, Any]: The updated application components.
     &#34;&#34;&#34;
     global app_settings
-    global n_spaceships_inspected
-    global time_elapsed_emitter
-    global population_complexity
-    global n_solutions_feas
-    global n_solutions_infeas
+
+    voxel_display = kwargs[&#39;curr_voxel_display&#39;]
 
     logging.getLogger(&#39;webapp&#39;).info(
         msg=&#39;Started resetting all bins (this may take a while)...&#39;)
     app_settings.current_mapelites.reset()
-    app_settings.current_mapelites.hull_builder.apply_smoothing = False
-    logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Reset completed.&#39;)
     app_settings.gen_counter = 0
-    app_settings.selected_bins = []
-    if app_settings.app_mode == AppMode.USERSTUDY:
-        n_spaceships_inspected.reset()
-        time_elapsed_emitter.reset()
-        population_complexity.reset()
-        n_solutions_feas.reset()
-        n_solutions_infeas.reset()
     _update_base_color(color=base_color)
+    # app_settings.selected_bins = []
+    valid_bins = [b.bin_idx for b in app_settings.current_mapelites._valid_bins()]
+    (j, i) = valid_bins[np.random.choice(len(valid_bins))]
+    app_settings.selected_bins = [(i, j)]
+    curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
+                                      bin_idx=(j, i),
+                                      pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;,
+                                      camera=None,
+                                      show_voxel=voxel_display)
+    elite = get_elite(mapelites=app_settings.current_mapelites,
+                      bin_idx=_switch([app_settings.selected_bins[-1]])[0],
+                      pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;)
+    cs_string = elite.string
+    cs_properties = get_properties_table(cs=elite)
+    logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Reset completed.&#39;)
 
     return {
         &#39;heatmap-plot.figure&#39;: _build_heatmap(mapelites=app_settings.current_mapelites,
                                               pop_name=kwargs[&#39;pop_name&#39;],
                                               metric_name=kwargs[&#39;metric_name&#39;],
                                               method_name=kwargs[&#39;method_name&#39;]),
-        &#39;content-plot.figure&#39;: _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None),
-        &#39;spaceship-properties.children&#39;: get_properties_table(cs=None)
+        &#39;content-plot.figure&#39;: curr_content,
+        &#39;content-string.value&#39;: cs_string,
+        &#39;spaceship-properties.children&#39;: cs_properties,
     }
 
 
@@ -2379,7 +2146,6 @@ def __update_rules(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
         new_rules.validate()
         app_settings.current_mapelites.lsystem.hl_solver.parser.rules = new_rules
         logging.getLogger(&#39;webapp&#39;).info(msg=f&#39;L-system rules updated.&#39;)
-        return True
     except AssertionError as e:
         logging.getLogger(&#39;webapp&#39;).info(
             msg=f&#39;Failed updating L-system rules ({e}).&#39;)
@@ -2459,7 +2225,6 @@ def __apply_symmetry(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     global app_settings
 
     event_trig = kwargs[&#39;event_trig&#39;]
-    symm_orientation = kwargs[&#39;symm_orientation&#39;]
 
     logging.getLogger(&#39;webapp&#39;).info(
         msg=f&#39;Updating all solutions to enforce symmetry...&#39;)
@@ -2467,27 +2232,28 @@ def __apply_symmetry(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
         symm_axis = &#39;None&#39;
     elif event_trig == &#39;symmetry-x&#39;:
         symm_axis = &#39;X-axis&#39;
-    elif event_trig == &#39;symmetry-y&#39;:
-        symm_axis = &#39;Y-axis&#39;
     elif event_trig == &#39;symmetry-z&#39;:
         symm_axis = &#39;Z-axis&#39;
     logging.getLogger(&#39;webapp&#39;).debug(
-        msg=f&#39;[{__name__}.__apply_symmetry] {symm_axis=}; {symm_orientation=}&#39;)
+        msg=f&#39;[{__name__}.__apply_symmetry] {symm_axis=}&#39;)
 
-    app_settings.current_mapelites.reassign_all_content(sym_axis=symm_axis[0].lower() if symm_axis != &#34;None&#34; else None,
-                                                        sym_upper=symm_orientation == &#39;Upper&#39;)
+    app_settings.symmetry = symm_axis[0].lower() if symm_axis != &#34;None&#34; else None
+    app_settings.selected_bins = []
+    curr_heatmap = _build_heatmap(mapelites=app_settings.current_mapelites,
+                                  pop_name=kwargs[&#39;pop_name&#39;],
+                                  metric_name=kwargs[&#39;metric_name&#39;],
+                                  method_name=kwargs[&#39;method_name&#39;])
     curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
                                       bin_idx=None,
                                       pop=None)
     logging.getLogger(&#39;webapp&#39;).info(msg=f&#39;Symmetry enforcement completed.&#39;)
 
-    app_settings.selected_bins = []
-
     return {
         &#39;content-plot.figure&#39;: curr_content,
+        &#39;heatmap-plot.figure&#39;: curr_heatmap,
         &#39;content-string.value&#39;: &#39;&#39;,
-        &#39;spaceship-properties.children&#39;: get_properties_table(),
-        &#39;symmetry-dropdown.label&#39;: symm_axis
+        &#39;symmetry-dropdown.label&#39;: symm_axis,
+        &#39;spaceship-properties.children&#39;: get_properties_table()
     }
 
 
@@ -2513,8 +2279,6 @@ def __update_content(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
                                               pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;,
                                               camera=None,
                                               show_voxel=voxel_display)
-            if app_settings.app_mode == AppMode.USERSTUDY:
-                n_spaceships_inspected.add(1)
             if not app_settings.current_mapelites.enforce_qnt and app_settings.selected_bins != []:
                 if (i, j) not in app_settings.selected_bins:
                     app_settings.selected_bins.append((i, j))
@@ -2555,16 +2319,19 @@ def __toggle_voxelization(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     &#34;&#34;&#34;
     global app_settings
 
+    curr_content = kwargs[&#39;curr_content&#39;]
     curr_camera = kwargs[&#39;curr_camera&#39;]
     voxel_display = kwargs[&#39;curr_voxel_display&#39;]
+    app_settings.voxelised = voxel_display
 
-    lb = _switch([app_settings.selected_bins[-1]])[0]
-    curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
-                                      bin_idx=lb,
-                                      pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;,
-                                      camera=curr_camera.get(
-                                          &#39;scene.camera&#39;, None),
-                                      show_voxel=voxel_display)
+    if app_settings.selected_bins:
+        lb = _switch([app_settings.selected_bins[-1]])[0]
+        curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
+                                        bin_idx=lb,
+                                        pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;,
+                                        camera=curr_camera.get(
+                                            &#39;scene.camera&#39;, None),
+                                        show_voxel=voxel_display)
 
     return {
         &#39;content-plot.figure&#39;: curr_content,
@@ -2663,166 +2430,6 @@ def __emitter(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     }
 
 
-def __experiment_loop_control(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
-    &#34;&#34;&#34;Change the current experiment and update the application components.
-
-    Returns:
-        Dict[str, Any]: The updated application components.
-    &#34;&#34;&#34;
-    global app_settings
-    global time_elapsed_emitter
-    global population_complexity
-    global n_solutions_feas
-    global n_solutions_infeas
-    global n_spaceships_inspected
-    global download_semaphore
-
-    cs_string = kwargs[&#39;cs_string&#39;]
-    cs_properties = kwargs[&#39;cs_properties&#39;]
-    curr_heatmap = kwargs[&#39;curr_heatmap&#39;]
-    curr_content = kwargs[&#39;curr_content&#39;]
-    eous_modal_show = kwargs[&#39;eous_modal_show&#39;]
-    qs_um_modal_show = kwargs[&#39;qs_um_modal_show&#39;]
-    nbs_err_modal_show = kwargs[&#39;nbs_err_modal_show&#39;]
-    rand_step_btn_style = kwargs[&#39;rand_step_btn_style&#39;]
-    reset_btn_style = kwargs[&#39;reset_btn_style&#39;]
-    exp_progress_style = kwargs[&#39;exp_progress_style&#39;]
-    metrics_dl = None
-    dlbtn_label = kwargs[&#39;dlbtn_label&#39;]
-
-    # if cs_string != &#39;&#39;:
-    if app_settings.selected_bins:
-
-        logging.getLogger(&#39;webapp&#39;).debug(
-            f&#39;[{__name__}.__experiment_loop_control] (pre-check) {download_semaphore.is_locked=}&#39;)
-        while download_semaphore.is_locked:
-            pass
-        logging.getLogger(&#39;webapp&#39;).debug(
-            f&#39;[{__name__}.__experiment_loop_control] (post-check) {download_semaphore.is_locked=}&#39;)
-        download_semaphore.lock(name=download_semaphore._running)
-        logging.getLogger(&#39;webapp&#39;).debug(
-            f&#39;[{__name__}.__experiment_loop_control] (re-lock) {download_semaphore.is_locked=}&#39;)
-
-        if app_settings.app_mode == AppMode.USERSTUDY and app_settings.gen_counter == N_GENS_ALLOWED:
-            app_settings.exp_n += 1
-            # check end of user study
-            if app_settings.exp_n &gt;= len(app_settings.my_emitterslist):
-                curr_heatmap = go.Figure(
-                    data=go.Heatmap(
-                        z=np.zeros(0, dtype=object),
-                        x=np.zeros(0, dtype=object),
-                        y=np.zeros(0, dtype=object),
-                        hoverongaps=False,
-                    ))
-                curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None)
-                cs_string = &#39;&#39;
-                cs_properties = get_properties_table()
-                if app_settings.app_mode == AppMode.USERSTUDY:
-                    metrics_dl = dict(content=json.dumps({
-                        &#39;time_elapsed_emitter&#39;: time_elapsed_emitter.history,
-                        &#39;n_interactions&#39;: n_spaceships_inspected.get_averages(),
-                        &#39;avg_complexity&#39;: population_complexity.history,
-                        &#39;n_solutions_feas&#39;: n_solutions_feas.history,
-                        &#39;n_solutions_infeas&#39;: n_solutions_feas.history
-                    }),
-                        filename=f&#39;user_metrics_{app_settings.rngseed}&#39;)
-                else:
-                    metrics_dl = None
-                logging.getLogger(&#39;webapp&#39;).info(
-                    f&#39;Reached end of all experiments! Please go back to the questionnaire to continue the evaluation.&#39;)
-                eous_modal_show = True
-                qs_um_modal_show = True
-                app_settings.app_mode = AppMode.USER
-                dlbtn_label = &#39;Download&#39;
-                app_settings.selected_bins = []
-                with open(os.path.join(curr_folder, &#39;.userstudyover&#39;), &#39;w&#39;):
-                    pass
-                logging.getLogger(&#39;webapp&#39;).info(
-                    msg=&#39;Initializing a new population; this may take a while...&#39;)
-                app_settings.current_mapelites.reset()
-                app_settings.current_mapelites.hull_builder.apply_smoothing = False
-                app_settings.current_mapelites.emitter = RandomEmitter()
-                rand_step_btn_style, reset_btn_style, exp_progress_style = {}, {
-                    &#39;justify-content&#39;: &#39;center&#39;}, hidden_style
-                curr_heatmap = _build_heatmap(mapelites=app_settings.current_mapelites,
-                                              pop_name=kwargs[&#39;pop_name&#39;],
-                                              metric_name=kwargs[&#39;metric_name&#39;],
-                                              method_name=kwargs[&#39;method_name&#39;])
-                curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None)
-                logging.getLogger(&#39;webapp&#39;).info(
-                    msg=&#39;Initialization completed.&#39;)
-            else:
-                logging.getLogger(&#39;webapp&#39;).info(
-                    msg=f&#39;Reached end of experiment {app_settings.exp_n}! Loading the next experiment...&#39;)
-                app_settings.gen_counter = 0
-                dlbtn_label = &#39;Download&#39;
-                app_settings.selected_bins = []
-                if app_settings.app_mode == AppMode.USERSTUDY:
-                    logging.getLogger(&#39;webapp&#39;).info(
-                        msg=&#39;Loading next population...&#39;)
-                    app_settings.current_mapelites.reset(lcs=[])
-                    app_settings.current_mapelites.hull_builder.apply_smoothing = False
-                    app_settings.current_mapelites.load_population(
-                        filename=app_settings.my_emitterslist[app_settings.exp_n])
-                    app_settings.current_mapelites.emitter = _get_emitter()
-                    logging.getLogger(&#39;webapp&#39;).info(
-                        msg=&#39;Next population loaded.&#39;)
-                    n_spaceships_inspected.new_generation(emitters=app_settings.my_emitterslist,
-                                                          exp_n=app_settings.exp_n)
-                    time_elapsed_emitter.new_generation(emitters=app_settings.my_emitterslist,
-                                                        exp_n=app_settings.exp_n)
-                    population_complexity.new_generation(emitters=app_settings.my_emitterslist,
-                                                         exp_n=app_settings.exp_n)
-                    n_solutions_feas.new_generation(emitters=app_settings.my_emitterslist,
-                                                    exp_n=app_settings.exp_n)
-                    n_solutions_infeas.new_generation(emitters=app_settings.my_emitterslist,
-                                                      exp_n=app_settings.exp_n)
-                    logging.getLogger(&#39;webapp&#39;).info(
-                        msg=&#39;Next experiment loaded. Please fill out the questionnaire before continuing.&#39;)
-                else:
-                    logging.getLogger(&#39;webapp&#39;).info(
-                        msg=&#39;Initializing a new population; this may take a while...&#39;)
-                    app_settings.current_mapelites.reset()
-                    app_settings.current_mapelites.hull_builder.apply_smoothing = False
-                    logging.getLogger(&#39;webapp&#39;).info(
-                        msg=&#39;Initialization completed.&#39;)
-                curr_heatmap = _build_heatmap(mapelites=app_settings.current_mapelites,
-                                              pop_name=kwargs[&#39;pop_name&#39;],
-                                              metric_name=kwargs[&#39;metric_name&#39;],
-                                              method_name=kwargs[&#39;method_name&#39;])
-                curr_content = _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None)
-                cs_string = &#39;&#39;
-                cs_properties = get_properties_table()
-            # update base color on new experiment switch
-            _update_base_color(color=base_color)
-    else:
-        nbs_err_modal_show = True
-
-    logging.getLogger(&#39;webapp&#39;).debug(
-        f&#39;[{__name__}.__experiment_loop_control] {app_settings.selected_bins=}; {app_settings.exp_n=}; {app_settings.gen_counter=}&#39;)
-
-    return {
-        &#39;heatmap-plot.figure&#39;: curr_heatmap,
-        &#39;content-plot.figure&#39;: curr_content,
-        &#39;content-string.value&#39;: cs_string,
-        &#39;spaceship-properties.children&#39;: cs_properties,
-        &#39;nbs-err-modal.is_open&#39;: nbs_err_modal_show,
-        &#39;eous-modal.is_open&#39;: eous_modal_show,
-        &#39;quickstart-usermode-modal.is_open&#39;: qs_um_modal_show,
-        &#39;rand-step-btn-div.style&#39;: rand_step_btn_style,
-        &#39;reset-btn-div.style&#39;: reset_btn_style,
-        &#39;exp-progress-div.style&#39;: exp_progress_style,
-        &#39;download-metrics.data&#39;: metrics_dl,
-        &#39;download-btn.children&#39;: dlbtn_label
-    }
-
-
 def __population_download(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     &#34;&#34;&#34;Download the current spaceships population and update the application components.
 
@@ -2832,7 +2439,7 @@ def __population_download(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     global app_settings
 
     content_dl = dict(content=json.dumps([b.to_json() for b in app_settings.current_mapelites.bins.flatten().tolist()]),
-                      filename=f&#39;population_{app_settings.rngseed}_exp{app_settings.exp_n}_{app_settings.current_mapelites.emitter.name}.json&#39;)
+                      filename=f&#39;population_{app_settings.rngseed}_exp{app_settings.gen_counter}_{app_settings.current_mapelites.emitter.name}.json&#39;)
     logging.getLogger(&#39;webapp&#39;).info(
         f&#39;The population will be downloaded shortly.&#39;)
     return {
@@ -2866,69 +2473,6 @@ def __population_upload(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
                                                   bin_idx=None,
                                                   pop=None),
         &#39;spaceship-properties.children&#39;: get_properties_table(cs=None)
-    }
-
-
-def __consent(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
-    &#34;&#34;&#34;Apply the privacy policy user consent choice and update the application components.
-
-    Returns:
-        Dict[str, Any]: The updated application components.
-    &#34;&#34;&#34;
-    global app_settings
-
-    nclicks_yes = kwargs[&#39;nclicks_yes&#39;]
-    nclicks_no = kwargs[&#39;nclicks_no&#39;]
-    qs_modal_show = kwargs[&#39;qs_modal_show&#39;]
-    qs_um_modal_show = kwargs[&#39;qs_um_modal_show&#39;]
-    rand_step_btn_style = kwargs[&#39;rand_step_btn_style&#39;]
-    reset_btn_style = kwargs[&#39;reset_btn_style&#39;]
-    exp_progress_style = kwargs[&#39;exp_progress_style&#39;]
-    cm_modal_show = kwargs[&#39;cm_modal_show&#39;]
-    study_style = kwargs[&#39;study_style&#39;]
-
-    app_settings.app_mode = AppMode.USERSTUDY if nclicks_yes else AppMode.USER# if nclicks_no else None
-    if nclicks_yes:
-        logging.getLogger(&#39;webapp&#39;).info(
-            msg=f&#39;Thank you for participating in the user study! Please do not refresh the page.&#39;)
-        logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Loading population...&#39;)
-        app_settings.current_mapelites.reset(lcs=[])
-        app_settings.current_mapelites.hull_builder.apply_smoothing = False
-        app_settings.current_mapelites.load_population(
-            filename=app_settings.my_emitterslist[app_settings.exp_n])
-        logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Population loaded.&#39;)
-        qs_modal_show = True
-    else:
-        logging.getLogger(&#39;webapp&#39;).info(
-            msg=f&#39;No user data will be collected during this session. Please do not refresh the page.&#39;)
-        logging.getLogger(&#39;webapp&#39;).info(
-            msg=&#39;Initializing population; this may take a while...&#39;)
-        app_settings.current_mapelites.emitter = RandomEmitter()
-        app_settings.current_mapelites.reset()
-        app_settings.current_mapelites.hull_builder.apply_smoothing = False
-        logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Initialization completed.&#39;)
-        qs_um_modal_show = True
-        rand_step_btn_style, reset_btn_style, exp_progress_style, study_style = {}, {
-            &#39;justify-content&#39;: &#39;center&#39;}, hidden_style, hidden_style
-    cm_modal_show = False
-    app_settings.gen_counter = 0
-
-    return {
-        &#39;heatmap-plot.figure&#39;: _build_heatmap(mapelites=app_settings.current_mapelites,
-                                              pop_name=kwargs[&#39;pop_name&#39;],
-                                              metric_name=kwargs[&#39;metric_name&#39;],
-                                              method_name=kwargs[&#39;method_name&#39;]),
-        &#39;content-plot.figure&#39;: _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None),
-        &#39;consent-modal.is_open&#39;: cm_modal_show,
-        &#39;quickstart-modal.is_open&#39;: qs_modal_show,
-        &#39;quickstart-usermode-modal.is_open&#39;: qs_um_modal_show,
-        &#39;rand-step-btn-div.style&#39;: rand_step_btn_style,
-        &#39;reset-btn-div.style&#39;: reset_btn_style,
-        &#39;exp-progress-div.style&#39;: exp_progress_style,
-        &#39;study-progress-div.style&#39;: study_style,
-        &#39;qus-div.style&#39;: {} if app_settings.app_mode == AppMode.USERSTUDY else hidden_style
     }
 
 
@@ -2977,13 +2521,11 @@ def __color(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
 
 def __show_quickstart_modal(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
     &#34;&#34;&#34;Show the quickstart modal and update the application components.
-
     Returns:
         Dict[str, Any]: The updated application components.
     &#34;&#34;&#34;
     return {
-        &#39;quickstart-modal.is_open&#39;: app_settings.app_mode == AppMode.USERSTUDY,
-        &#39;quickstart-usermode-modal.is_open&#39;: app_settings.app_mode == AppMode.USER
+        &#39;quickstart-usermode-modal.is_open&#39;: True
     }
 
 
@@ -3001,73 +2543,54 @@ def __default(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
                                               metric_name=kwargs[&#39;metric_name&#39;],
                                               method_name=kwargs[&#39;method_name&#39;]),
         &#39;content-plot.figure&#39;: _get_elite_content(mapelites=app_settings.current_mapelites,
-                                                  bin_idx=None,
-                                                  pop=None)
+                                                  bin_idx=_switch([app_settings.selected_bins[-1]])[0] if app_settings.selected_bins else None,
+                                                  pop=&#39;feasible&#39; if kwargs[&#39;pop_name&#39;] == &#39;Feasible&#39; else &#39;infeasible&#39;)
     }
 
 
-def __quit_user_study(**kwargs: Dict[str, Any]) -&gt; Dict[str, Any]:
-    &#34;&#34;&#34;Quit the user study and update the application components.
+def __show_toggle_unsafe_mode_modal(**kwargs) -&gt; Dict[str, Any]:
+    curr_unsafemode = kwargs[&#39;curr_unsafemode&#39;]
+    
+    return {
+        &#39;sm-modal.is_open&#39;: True,
+        &#39;unsaferules-mode-toggle.value&#39;: not curr_unsafemode
+    }
 
-    Returns:
-        Dict[str, Any]: The updated application components.
-    &#34;&#34;&#34;
-    global app_settings
-    global n_spaceships_inspected
-    global time_elapsed_emitter
-    global population_complexity
-    global n_solutions_feas
-    global n_solutions_infeas
 
-    logging.getLogger(&#39;webapp&#39;).debug(
-        msg=f&#39;Switching mode from {app_settings.app_mode} to {AppMode.USER}...&#39;)
-    app_settings.app_mode = AppMode.USER
-    logging.getLogger(&#39;webapp&#39;).info(
-        msg=f&#39;No user data will be collected during this session. Please do not refresh the page.&#39;)
-    logging.getLogger(&#39;webapp&#39;).info(
-        msg=&#39;Initializing population; this may take a while...&#39;)
-    app_settings.current_mapelites.emitter = RandomEmitter()
-    app_settings.current_mapelites.reset()
+def __toggle_unsafe_mode(**kwargs) -&gt; Dict[str, Any]:
+    curr_unsafemode = kwargs[&#39;curr_unsafemode&#39;]
+    logging.getLogger(&#39;webapp&#39;).info(msg=f&#39;Toggling safe mode to {not curr_unsafemode}&#39;)
+    logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.__toggle_unsafe_mode] Current safe mode is {curr_unsafemode}&#39;)
+    ruleset = &#39;hlrules&#39; if curr_unsafemode else &#39;hlrules_sm&#39;
+    logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.__toggle_unsafe_mode] New HL ruleset is {ruleset}&#39;)
+    try:
+        new_rules = RuleMaker(ruleset=ruleset).get_rules()
+        app_settings.current_mapelites.lsystem.hl_solver.parser.rules = new_rules
+        logging.getLogger(&#39;webapp&#39;).info(msg=f&#39;L-system rules updated.&#39;)
+    except AssertionError as e:
+        logging.getLogger(&#39;webapp&#39;).warn(msg=f&#39;Failed updating L-system rules ({e}).&#39;)
+    logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Started resetting all bins (this may take a while)...&#39;)
     app_settings.current_mapelites.hull_builder.apply_smoothing = False
-    logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Initialization completed.&#39;)
+    app_settings.current_mapelites.reset()
+    logging.getLogger(&#39;webapp&#39;).info(msg=&#39;Reset completed.&#39;)
     app_settings.gen_counter = 0
     app_settings.selected_bins = []
-    _update_base_color(color=base_color)
-
-    n_spaceships_inspected.reset()
-    time_elapsed_emitter.reset()
-    population_complexity.reset()
-    n_solutions_feas.reset()
-    n_solutions_infeas.reset()
-
+    app_settings.safe_mode = not curr_unsafemode
+    
     return {
+        &#39;sm-modal.is_open&#39;: False,
+        &#39;unsaferules-mode-toggle.value&#39;: not curr_unsafemode,
+        &#39;sm-modal-title.children&#39;: dbc.ModalTitle(&#34;Turn on safe mode?&#34;) if curr_unsafemode else dbc.ModalTitle(&#34;Turn off safe mode?&#34;),
+        &#39;sm-modal-body.children&#39;: toggle_safe_rules_on_msg if curr_unsafemode else toggle_safe_rules_off_msg,
+        &#39;hl-rules.value&#39;: str(app_settings.current_mapelites.lsystem.hl_solver.parser.rules),
         &#39;heatmap-plot.figure&#39;: _build_heatmap(mapelites=app_settings.current_mapelites,
                                               pop_name=kwargs[&#39;pop_name&#39;],
                                               metric_name=kwargs[&#39;metric_name&#39;],
                                               method_name=kwargs[&#39;method_name&#39;]),
-        &#39;consent-modal.is_open&#39;: False,
-        &#39;quickstart-usermode-modal.is_open&#39;: True,
-        &#39;rand-step-btn-div.style&#39;: {},
-        &#39;reset-btn-div.style&#39;: {&#39;justify-content&#39;: &#39;center&#39;},
-        &#39;exp-progress-div.style&#39;: hidden_style,
-        &#39;study-progress-div.style&#39;: hidden_style,
-        &#39;qus-div.style&#39;: hidden_style,
-        &#39;eus-modal.is_open&#39;: False,
         &#39;content-plot.figure&#39;: _get_elite_content(mapelites=app_settings.current_mapelites,
                                                   bin_idx=None,
                                                   pop=None),
         &#39;spaceship-properties.children&#39;: get_properties_table(cs=None)
-    }
-
-
-def __show_quit_user_study_modal(**kwargs) -&gt; Dict[str, Any]:
-    &#34;&#34;&#34;Show the quit user study modal and update the application components.
-
-    Returns:
-        Dict[str, Any]: The updated application components.
-    &#34;&#34;&#34;
-    return {
-        &#39;eus-modal.is_open&#39;: True
     }
 
 
@@ -3095,9 +2618,7 @@ triggers_map = {
     &#39;method-radio&#39;: __update_heatmap,
     &#39;symmetry-none&#39;: __apply_symmetry,
     &#39;symmetry-x&#39;: __apply_symmetry,
-    &#39;symmetry-y&#39;: __apply_symmetry,
     &#39;symmetry-z&#39;: __apply_symmetry,
-    &#39;symmetry-radio&#39;: __apply_symmetry,
     &#39;heatmap-plot&#39;: __update_content,
     &#39;population_dropdown&#39;: __update_content,
     &#39;selection-btn&#39;: __selection,
@@ -3111,18 +2632,15 @@ triggers_map = {
     &#39;emitter-knn&#39;: __emitter,
     &#39;emitter-linkernel&#39;: __emitter,
     &#39;emitter-rbfkernel&#39;: __emitter,
-    &#39;download-btn&#39;: __experiment_loop_control,
     &#39;popdownload-btn&#39;: __population_download,
     &#39;popupload-data&#39;: __population_upload,
-    &#39;consent-yes&#39;: __consent,
-    &#39;consent-no&#39;: __consent,
     &#39;nbs-err-btn&#39;: __close_error,
     &#39;color-picker-btn&#39;: __color,
     &#39;fitness-sldr&#39;: __fitness_weights,
     &#39;webapp-quickstart-btn&#39;: __show_quickstart_modal,
-    &#39;qus-btn&#39;: __show_quit_user_study_modal,
-    &#39;qus-y-btn&#39;: __quit_user_study,
     &#39;voxel-preview-toggle&#39;: __toggle_voxelization,
+    &#39;unsaferules-mode-toggle&#39;: __show_toggle_unsafe_mode_modal,
+    &#39;tsrm-y-btn&#39;: __toggle_unsafe_mode,
     None: __default
 }
 
@@ -3141,21 +2659,20 @@ triggers_map = {
               Output(&#39;b0-dropdown&#39;, &#39;label&#39;),
               Output(&#39;b1-dropdown&#39;, &#39;label&#39;),
               Output(&#39;symmetry-dropdown&#39;, &#39;label&#39;),
-              Output(&#34;quickstart-modal&#34;, &#34;is_open&#34;),
               Output(&#34;quickstart-usermode-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;consent-modal&#34;, &#34;is_open&#34;),
               Output(&#34;nbs-err-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;eoe-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;eous-modal&#34;, &#34;is_open&#34;),
               Output(&#34;rand-step-btn-div&#34;, &#34;style&#34;),
               Output(&#34;reset-btn-div&#34;, &#34;style&#34;),
-              Output(&#34;exp-progress-div&#34;, &#34;style&#34;),
-              Output(&#39;study-progress-div&#39;, &#39;style&#39;),
-              Output(&#39;download-btn&#39;, &#39;children&#39;),
               Output(&#39;content-legend-div&#39;, &#39;children&#39;),
-              Output(&#39;qus-div&#39;, &#39;style&#39;),
-              Output(&#34;eus-modal&#34;, &#34;is_open&#34;),
               Output(&#39;emitter-dropdown&#39;, &#39;label&#39;),
+              Output(&#39;sm-modal&#39;, &#39;is_open&#39;),
+              Output(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              Output(&#39;unsafemode-div&#39;, &#39;style&#39;),
+              Output(&#39;sm-modal-title&#39;, &#39;children&#39;),
+              Output(&#39;sm-modal-body&#39;, &#39;children&#39;),
+              Output(&#39;emitter-steps-div&#39;, &#39;style&#39;),
+              Output(&#39;symmetry-div&#39;, &#39;style&#39;),
+              Output(&#39;experiment-settings-div&#39;, &#39;style&#39;),
 
               State(&#39;heatmap-plot&#39;, &#39;figure&#39;),
               State(&#39;hl-rules&#39;, &#39;value&#39;),
@@ -3168,22 +2685,19 @@ triggers_map = {
               State(&#39;b1-dropdown&#39;, &#39;label&#39;),
               State(&#39;symmetry-dropdown&#39;, &#39;label&#39;),
               State(&#39;emitter-dropdown&#39;, &#39;label&#39;),
-              State(&#34;quickstart-modal&#34;, &#34;is_open&#34;),
               State(&#34;quickstart-usermode-modal&#34;, &#34;is_open&#34;),
-              State(&#34;consent-modal&#34;, &#34;is_open&#34;),
               State(&#34;nbs-err-modal&#34;, &#34;is_open&#34;),
-              State(&#34;eoe-modal&#34;, &#34;is_open&#34;),
-              State(&#34;eous-modal&#34;, &#34;is_open&#34;),
               State(&#34;rand-step-btn-div&#34;, &#34;style&#34;),
               State(&#34;reset-btn-div&#34;, &#34;style&#34;),
-              State(&#34;exp-progress-div&#34;, &#34;style&#34;),
-              State(&#39;study-progress-div&#39;, &#39;style&#39;),
-              State(&#39;download-btn&#39;, &#39;children&#39;),
               State(&#39;content-legend-div&#39;, &#39;children&#39;),
-              State(&#34;eus-modal&#34;, &#34;is_open&#34;),
               State(&#39;color-picker&#39;, &#39;value&#39;),
               State(&#34;content-plot&#34;, &#34;relayoutData&#34;),
               State(&#34;voxel-preview-toggle&#34;, &#34;value&#34;),
+              State(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              State(&#39;unsafemode-div&#39;, &#39;style&#39;),
+              State(&#39;sm-modal-title&#39;, &#39;children&#39;),
+              State(&#39;sm-modal-body&#39;, &#39;children&#39;),
+              State(&#39;emitter-steps-div&#39;, &#39;style&#39;),
 
               Input(&#39;population-feasible&#39;, &#39;n_clicks&#39;),
               Input(&#39;population-infeasible&#39;, &#39;n_clicks&#39;),
@@ -3218,22 +2732,17 @@ triggers_map = {
               Input(&#39;emitter-knn&#39;, &#39;n_clicks&#39;),
               Input(&#39;emitter-linkernel&#39;, &#39;n_clicks&#39;),
               Input(&#39;emitter-rbfkernel&#39;, &#39;n_clicks&#39;),
-              Input(&#34;download-btn&#34;, &#34;n_clicks&#34;),
               Input(&#39;popdownload-btn&#39;, &#39;n_clicks&#39;),
               Input(&#39;popupload-data&#39;, &#39;filename&#39;),
               Input(&#39;symmetry-none&#39;, &#39;n_clicks&#39;),
               Input(&#39;symmetry-x&#39;, &#39;n_clicks&#39;),
-              Input(&#39;symmetry-y&#39;, &#39;n_clicks&#39;),
               Input(&#39;symmetry-z&#39;, &#39;n_clicks&#39;),
-              Input(&#39;symmetry-radio&#39;, &#39;value&#39;),
-              Input(&#34;consent-yes&#34;, &#34;n_clicks&#34;),
-              Input(&#34;consent-no&#34;, &#34;n_clicks&#34;),
               Input(&#34;nbs-err-btn&#34;, &#34;n_clicks&#34;),
               Input(&#39;color-picker-btn&#39;, &#39;n_clicks&#39;),
               Input(&#39;webapp-quickstart-btn&#39;, &#39;n_clicks&#39;),
-              Input(&#39;qus-btn&#39;, &#39;n_clicks&#39;),
-              Input(&#39;qus-y-btn&#39;, &#39;n_clicks&#39;),
               Input(&#34;voxel-preview-toggle&#34;, &#34;value&#34;),
+              Input(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              Input(&#34;tsrm-y-btn&#34;, &#34;n_clicks&#34;),
               )
 def general_callback(curr_heatmap: Dict[str, Any],
                      rules: str,
@@ -3246,22 +2755,19 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      b1: str,
                      symm_axis: str,
                      emitter_name: str,
-                     qs_modal_show: bool,
                      qs_um_modal_show: bool,
-                     cm_modal_show: bool,
                      nbs_err_modal_show: bool,
-                     eoe_modal_show: bool,
-                     eous_modal_show: bool,
                      rand_step_btn_style: Dict[str, str],
                      reset_btn_style: Dict[str, str],
-                     exp_progress_style: Dict[str, str],
-                     study_style: Dict[str, str],
-                     dlbtn_label: str,
                      curr_legend: List[Any],
-                     eus_modal_show: bool,
                      color: str,
                      curr_camera: Dict[str, str],
                      curr_voxel_display: bool,
+                     curr_unsafemode: bool,
+                     curr_unsafemode_div_style: Dict[str, str],
+                     curr_unsafemode_title: str,
+                     curr_unsafemode_body: str,
+                     curr_emittersteps_style: Dict[str, str],
                      
                      pop_feas: int,
                      pop_infeas: int,
@@ -3296,22 +2802,18 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      emitter7_nclicks: int,
                      emitter8_nclicks: int,
                      emitter9_nclicks: int,
-                     n_clicks_cs_download: int,
                      n_clicks_popdownload: int,
                      upload_filename: str,
                      symm_none: int,
                      symm_x: int,
-                     symm_y: int,
                      symm_z: int,
-                     symm_orientation: str,
-                     nclicks_yes: int,
-                     nclicks_no: int,
                      nbs_btn: int,
                      color_btn: int,
                      qs_btn: int,
-                     qus_btn: int,
-                     qus_y_btn: int,
-                     switch_voxel_display: bool) -&gt; Tuple[Any, ...]:
+                     switch_voxel_display: bool,
+                     switch_unsafemode: bool,
+                     confirm_unsafemode_switch: int,
+                     prevent_initial_call=False) -&gt; Tuple[Any, ...]:
     &#34;&#34;&#34;General callback for the application.
 
     Args:
@@ -3330,15 +2832,9 @@ def general_callback(curr_heatmap: Dict[str, Any],
         qs_um_modal_show (bool): Whether the &#34;Quickstart&#34; modal (for the user mode) is currently displayed.
         cm_modal_show (bool): Whether the &#34;Privacy Policy&#34; modal is currently displayed.
         nbs_err_modal_show (bool): Whether the &#34;Warning&#34; modal is currently displayed.
-        eoe_modal_show (bool): Whether the &#34;End of Generation&#34; modal is currently displayed.
-        eous_modal_show (bool): Whether the &#34;End of User Study&#34; modal is currently displayed.
         rand_step_btn_style (Dict[str, str]): The CSS style of the &#34;Evolve from Random Spaceship&#34; button.
         reset_btn_style (Dict[str, str]): The CSS style of the &#34;Reinitialize Population&#34; button.
-        exp_progress_style (Dict[str, str]): The CSS style of the &#34;Spaceships Generation Progress&#34; progress bar container.
-        study_style (Dict[str, str]): The CSS style of the &#34;Current Iteration&#34; progress bar container.
-        dlbtn_label (str): The current label of the spaceship download button.
         curr_legend (List[Any]): The current spaceship preview legend.
-        eus_modal_show (bool): Whether the &#34;Quit User Study&#34; modal is currently displayed.
         color (str): The currently picked spaceship base blocks color.
         curr_camera (Dict[str, str]): The current spaceship preview plot camera position.
         curr_voxel_display (bool): Whether the spaceship preview plot currently uses voxels.
@@ -3388,14 +2884,13 @@ def general_callback(curr_heatmap: Dict[str, Any],
         nbs_btn (int): The number of button clicks.
         color_btn (int): The number of button clicks.
         qs_btn (int): The number of button clicks.
-        qus_btn (int): The number of button clicks.
-        qus_y_btn (int): The number of button clicks.
         switch_voxel_display (bool): The new value.
 
     Returns:
         Tuple[Any, ...]: _description_
     &#34;&#34;&#34;
     global app_settings
+    global first_launch
 
     ctx = dash.callback_context
 
@@ -3404,6 +2899,10 @@ def general_callback(curr_heatmap: Dict[str, Any],
     else:
         event_trig = ctx.triggered[0][&#39;prop_id&#39;].split(&#39;.&#39;)[0]
 
+    if event_trig is None and first_launch:
+        event_trig = &#39;reset-btn&#39;
+        first_launch = False
+    
     if event_trig not in triggers_map:
         try:
             import ast
@@ -3412,13 +2911,9 @@ def general_callback(curr_heatmap: Dict[str, Any],
         except ValueError:
             logging.getLogger(&#39;webapp&#39;).error(
                 msg=f&#39;[{__name__}.general_callback] Unrecognized {event_trig=}. No operations have been applied!&#39;)
-
-    if event_trig is None and app_settings.consent_ok is None and app_settings.app_mode == AppMode.USER:
-        event_trig = &#39;consent-no&#39;  # simulate declining privacy policy
-        app_settings.consent_ok = False
     
-    vars = locals()
-
+    vars = locals()    
+    
     output = {
         &#39;heatmap-plot.figure&#39;: curr_heatmap,
         &#39;content-plot.figure&#39;: curr_content,
@@ -3434,29 +2929,24 @@ def general_callback(curr_heatmap: Dict[str, Any],
         &#39;b0-dropdown.label&#39;: b0,
         &#39;b1-dropdown.label&#39;: b1,
         &#39;symmetry-dropdown.label&#39;: symm_axis,
-        &#39;quickstart-modal.is_open&#39;: qs_modal_show,
         &#39;quickstart-usermode-modal.is_open&#39;: qs_um_modal_show,
-        &#39;consent-modal.is_open&#39;: cm_modal_show if app_settings.app_mode is not None else True,
         &#39;nbs-err-modal.is_open&#39;: nbs_err_modal_show,
-        &#39;eoe-modal.is_open&#39;: eoe_modal_show,
-        &#39;eous-modal.is_open&#39;: eous_modal_show,
         &#39;rand-step-btn-div.style&#39;: rand_step_btn_style,
         &#39;reset-btn-div.style&#39;: reset_btn_style,
-        &#39;exp-progress-div.style&#39;: exp_progress_style,
-        &#39;study-progress-div.style&#39;: study_style,
-        &#39;download-btn.children&#39;: dlbtn_label,
         &#39;content-legend-div.children&#39;: curr_legend,
-        &#39;qus-div.style&#39;: {&#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USERSTUDY else hidden_style,
-        &#39;eus-modal.is_open&#39;: eus_modal_show,
-        &#39;emitter-dropdown.label&#39;: emitter_name
+        &#39;emitter-dropdown.label&#39;: emitter_name,
+        &#39;sm-modal.is_open&#39;: False,
+        &#39;unsaferules-mode-toggle.value&#39;: curr_unsafemode,
+        &#39;unsafemode-div.style&#39;: curr_unsafemode_div_style,
+        &#39;sm-modal-title.children&#39;: curr_unsafemode_title,
+        &#39;sm-modal-body.children&#39;: curr_unsafemode_body,
+        &#39;emitter-steps-div.style&#39;: curr_emittersteps_style,
+        &#39;symmetry-div.style&#39;: dash.no_update,
+        &#39;experiment-settings-div.style&#39;: dash.no_update
     }
 
     logging.getLogger(&#39;webapp&#39;).debug(
-        f&#39;[{__name__}.general_callback] {event_trig=}; {app_settings.exp_n=}; {app_settings.gen_counter=}; {app_settings.selected_bins=}; {app_settings.current_mapelites.emitter=}; {process_semaphore.is_locked=}&#39;)
-
-    for metric in all_metrics:
-        logging.getLogger(&#39;webapp&#39;).debug(
-            f&#39;[{__name__}.general_callback] metric={metric.name}; {metric.history=}&#39;)
+        f&#39;[{__name__}.general_callback] {event_trig=}; {app_settings.gen_counter=}; {app_settings.selected_bins=}; {app_settings.current_mapelites.emitter=}; {process_semaphore.is_locked=}&#39;)
 
     if not process_semaphore.is_locked:
         process_semaphore.lock(name=event_trig)
@@ -3494,46 +2984,24 @@ def general_callback(curr_heatmap: Dict[str, Any],
 <section>
 <h2 class="section-title" id="header-functions">Functions</h2>
 <dl>
-<dt id="pcgsepy.guis.main_webapp.webapp.disable_privacy_modal_buttons"><code class="name flex">
-<span>def <span class="ident">disable_privacy_modal_buttons</span></span>(<span>ny: int, nn: int) ‑> Tuple[bool, bool]</span>
+<dt id="pcgsepy.guis.main_webapp.webapp.change_emitter_steps"><code class="name flex">
+<span>def <span class="ident">change_emitter_steps</span></span>(<span>n_steps: int) ‑> Any</span>
 </code></dt>
 <dd>
-<div class="desc"><p>Disable the privacy modal buttons.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>ny</code></strong> :&ensp;<code>int</code></dt>
-<dd>Number of "yes" button clicks.</dd>
-<dt><strong><code>nn</code></strong> :&ensp;<code>int</code></dt>
-<dd>Number of "no" button clicks.</dd>
-</dl>
-<h2 id="returns">Returns</h2>
-<dl>
-<dt><code>Tuple[bool, bool]</code></dt>
-<dd>Both buttons disable value.</dd>
-</dl></div>
+<div class="desc"></div>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@app.callback(
-    Output(&#34;consent-yes&#34;, &#34;disabled&#34;),
-    Output(&#34;consent-no&#34;, &#34;disabled&#34;),
-    Input(&#34;consent-yes&#34;, &#34;n_clicks&#34;),
-    Input(&#34;consent-no&#34;, &#34;n_clicks&#34;),
+    Output(&#34;evo-iter-sldr&#34;, &#34;value&#34;),
+    Input(&#34;evo-iter-sldr&#34;, &#34;value&#34;),
     prevent_initial_call=True
 )
-def disable_privacy_modal_buttons(ny: int,
-                                  nn: int) -&gt; Tuple[bool, bool]:
-    &#34;&#34;&#34;Disable the privacy modal buttons.
-
-    Args:
-        ny (int): Number of &#34;yes&#34; button clicks.
-        nn (int): Number of &#34;no&#34; button clicks.
-
-    Returns:
-        Tuple[bool, bool]: Both buttons disable value.
-    &#34;&#34;&#34;
-    return True, True</code></pre>
+def change_emitter_steps(n_steps: int) -&gt; Any:
+    logging.getLogger(&#39;webapp&#39;).info(f&#39;Setting evolution iterations to {n_steps}...&#39;)
+    app_settings.emitter_steps = n_steps
+    return n_steps</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.guis.main_webapp.webapp.download_content"><code class="name flex">
@@ -3584,25 +3052,36 @@ def download_content(curr_content: Dict[str, Any],
     global download_semaphore
 
     def write_archive(bytes_io):
-        with ZipFile(bytes_io, mode=&#34;w&#34;) as zf:
+        with ZipFile(bytes_io, mode=&#34;w&#34;, compression=ZIP_DEFLATED) as zf:
             # with open(&#39;./assets/thumb.png&#39;, &#39;rb&#39;) as f:
             #     thumbnail_img = f.read()
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Started function, writing zip file...&#39;)
             content_fig = go.Figure(data=curr_content[&#39;data&#39;],
                                     layout=curr_content[&#39;layout&#39;])
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Created thumbnail from plot...&#39;)
             content_fig.update_layout(scene_camera=curr_camera.get(&#39;scene.camera&#39;, None))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Updated thumbnail camera...&#39;)
             thumbnail_img = content_fig.to_image(format=&#34;png&#34;)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Converted to image...&#39;)
             zf.writestr(&#39;thumb.png&#39;, thumbnail_img)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Loaded and saved thumbnail.&#39;)
             elite = get_elite(mapelites=app_settings.current_mapelites,
                               bin_idx=_switch(
                                   [app_settings.selected_bins[-1]])[0],
                               pop=&#39;feasible&#39;)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Loaded elite solution {elite=}.&#39;)
+            if app_settings.symmetry is not None:
+                elite.string = enforce_symmetry(string=elite.string,
+                                                    axis=app_settings.symmetry)
             tmp = CandidateSolution(string=elite.string)
             tmp.ll_string = elite.ll_string
             tmp.base_color = elite.base_color
             app_settings.current_mapelites.lsystem._set_structure(cs=tmp)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Copied threadsafe elite solution, starting hullbuilding...&#39;)
             hullbuilder = HullBuilder(erosion_type=app_settings.current_mapelites.hull_builder.erosion_type,
                                       apply_erosion=True,
                                       apply_smoothing=True)
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Added external hull, unlocking semaphore...&#39;)
             download_semaphore.unlock()
             download_semaphore._running = &#39;YES&#39;
             logging.getLogger(&#39;webapp&#39;).debug(
@@ -3612,19 +3091,21 @@ def download_content(curr_content: Dict[str, Any],
             logging.getLogger(&#39;webapp&#39;).debug(
                 f&#39;[{__name__}.write_archive] {tmp.string=}; {tmp.content=}; {tmp.base_color=}&#39;)
             zf.writestr(&#39;bp.sbc&#39;, convert_structure_to_xml(structure=tmp.content,
-                        name=f&#39;My Spaceship ({app_settings.rngseed}) (exp{app_settings.exp_n})&#39;))
+                        name=f&#39;My Spaceship ({app_settings.rngseed})&#39;))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Created game blueprint, saving spaceship string representation...&#39;)
             content_properties = {
                 &#39;string&#39;: tmp.string,
                 &#39;base_color&#39;: tmp.base_color.as_dict()
             }
-            zf.writestr(f&#39;spaceship_{app_settings.rngseed}_exp{app_settings.exp_n}&#39;, json.dumps(
+            zf.writestr(f&#39;spaceship_{app_settings.rngseed}_gen{app_settings.gen_counter}&#39;, json.dumps(
                 content_properties))
+            logging.getLogger(&#39;webapp&#39;).debug(msg=f&#39;[{__name__}.write_archive] Zip file completed and ready to be downloaded.&#39;)
             download_semaphore._running = &#39;NO&#39;
 
     if app_settings.selected_bins:
         logging.getLogger(&#39;webapp&#39;).info(
             f&#39;Your selected spaceship will be downloaded shortly.&#39;)
-        return dcc.send_bytes(write_archive, f&#39;MySpaceship_{app_settings.rngseed}_exp{app_settings.exp_n}_gen{app_settings.gen_counter}.zip&#39;), &#39;\n\n&#39;
+        return dcc.send_bytes(write_archive, f&#39;MySpaceship_{app_settings.rngseed}_gen{app_settings.gen_counter}.zip&#39;), &#39;\n\n&#39;
     else:
         return None, &#39;\n\n&#39;</code></pre>
 </details>
@@ -3670,7 +3151,7 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
 </details>
 </dd>
 <dt id="pcgsepy.guis.main_webapp.webapp.general_callback"><code class="name flex">
-<span>def <span class="ident">general_callback</span></span>(<span>curr_heatmap: Dict[str, Any], rules: str, curr_content: Dict[str, Any], cs_string: str, cs_properties: List[Any], pop_name: str, metric_name: str, b0: str, b1: str, symm_axis: str, emitter_name: str, qs_modal_show: bool, qs_um_modal_show: bool, cm_modal_show: bool, nbs_err_modal_show: bool, eoe_modal_show: bool, eous_modal_show: bool, rand_step_btn_style: Dict[str, str], reset_btn_style: Dict[str, str], exp_progress_style: Dict[str, str], study_style: Dict[str, str], dlbtn_label: str, curr_legend: List[Any], eus_modal_show: bool, color: str, curr_camera: Dict[str, str], curr_voxel_display: bool, pop_feas: int, pop_infeas: int, metric_fitness: int, metric_age: int, metric_coverage: int, method_name: str, n_clicks_step: int, n_clicks_rand_step: int, n_clicks_reset: int, n_clicks_sub: int, weights: Dict[str, float], b0_mame: int, b0_mami: int, b0_avgp: int, b0_sym: int, b1_mame: int, b1_mami: int, b1_avgp: int, b1_sym: int, modules: bool, n_clicks_rules: int, clickData: Dict[str, Any], selection_btn: int, clear_btn: int, emitter1_nclicks: int, emitter2_nclicks: int, emitter3_nclicks: int, emitter4_nclicks: int, emitter5_nclicks: int, emitter6_nclicks: int, emitter7_nclicks: int, emitter8_nclicks: int, emitter9_nclicks: int, n_clicks_cs_download: int, n_clicks_popdownload: int, upload_filename: str, symm_none: int, symm_x: int, symm_y: int, symm_z: int, symm_orientation: str, nclicks_yes: int, nclicks_no: int, nbs_btn: int, color_btn: int, qs_btn: int, qus_btn: int, qus_y_btn: int, switch_voxel_display: bool) ‑> Tuple[Any, ...]</span>
+<span>def <span class="ident">general_callback</span></span>(<span>curr_heatmap: Dict[str, Any], rules: str, curr_content: Dict[str, Any], cs_string: str, cs_properties: List[Any], pop_name: str, metric_name: str, b0: str, b1: str, symm_axis: str, emitter_name: str, qs_um_modal_show: bool, nbs_err_modal_show: bool, rand_step_btn_style: Dict[str, str], reset_btn_style: Dict[str, str], curr_legend: List[Any], color: str, curr_camera: Dict[str, str], curr_voxel_display: bool, curr_unsafemode: bool, curr_unsafemode_div_style: Dict[str, str], curr_unsafemode_title: str, curr_unsafemode_body: str, curr_emittersteps_style: Dict[str, str], pop_feas: int, pop_infeas: int, metric_fitness: int, metric_age: int, metric_coverage: int, method_name: str, n_clicks_step: int, n_clicks_rand_step: int, n_clicks_reset: int, n_clicks_sub: int, weights: Dict[str, float], b0_mame: int, b0_mami: int, b0_avgp: int, b0_sym: int, b1_mame: int, b1_mami: int, b1_avgp: int, b1_sym: int, modules: bool, n_clicks_rules: int, clickData: Dict[str, Any], selection_btn: int, clear_btn: int, emitter1_nclicks: int, emitter2_nclicks: int, emitter3_nclicks: int, emitter4_nclicks: int, emitter5_nclicks: int, emitter6_nclicks: int, emitter7_nclicks: int, emitter8_nclicks: int, emitter9_nclicks: int, n_clicks_popdownload: int, upload_filename: str, symm_none: int, symm_x: int, symm_z: int, nbs_btn: int, color_btn: int, qs_btn: int, switch_voxel_display: bool, switch_unsafemode: bool, confirm_unsafemode_switch: int, prevent_initial_call=False) ‑> Tuple[Any, ...]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>General callback for the application.</p>
@@ -3706,24 +3187,12 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
 <dd>Whether the "Privacy Policy" modal is currently displayed.</dd>
 <dt><strong><code>nbs_err_modal_show</code></strong> :&ensp;<code>bool</code></dt>
 <dd>Whether the "Warning" modal is currently displayed.</dd>
-<dt><strong><code>eoe_modal_show</code></strong> :&ensp;<code>bool</code></dt>
-<dd>Whether the "End of Generation" modal is currently displayed.</dd>
-<dt><strong><code>eous_modal_show</code></strong> :&ensp;<code>bool</code></dt>
-<dd>Whether the "End of User Study" modal is currently displayed.</dd>
 <dt><strong><code>rand_step_btn_style</code></strong> :&ensp;<code>Dict[str, str]</code></dt>
 <dd>The CSS style of the "Evolve from Random Spaceship" button.</dd>
 <dt><strong><code>reset_btn_style</code></strong> :&ensp;<code>Dict[str, str]</code></dt>
 <dd>The CSS style of the "Reinitialize Population" button.</dd>
-<dt><strong><code>exp_progress_style</code></strong> :&ensp;<code>Dict[str, str]</code></dt>
-<dd>The CSS style of the "Spaceships Generation Progress" progress bar container.</dd>
-<dt><strong><code>study_style</code></strong> :&ensp;<code>Dict[str, str]</code></dt>
-<dd>The CSS style of the "Current Iteration" progress bar container.</dd>
-<dt><strong><code>dlbtn_label</code></strong> :&ensp;<code>str</code></dt>
-<dd>The current label of the spaceship download button.</dd>
 <dt><strong><code>curr_legend</code></strong> :&ensp;<code>List[Any]</code></dt>
 <dd>The current spaceship preview legend.</dd>
-<dt><strong><code>eus_modal_show</code></strong> :&ensp;<code>bool</code></dt>
-<dd>Whether the "Quit User Study" modal is currently displayed.</dd>
 <dt><strong><code>color</code></strong> :&ensp;<code>str</code></dt>
 <dd>The currently picked spaceship base blocks color.</dd>
 <dt><strong><code>curr_camera</code></strong> :&ensp;<code>Dict[str, str]</code></dt>
@@ -3822,10 +3291,6 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
 <dd>The number of button clicks.</dd>
 <dt><strong><code>qs_btn</code></strong> :&ensp;<code>int</code></dt>
 <dd>The number of button clicks.</dd>
-<dt><strong><code>qus_btn</code></strong> :&ensp;<code>int</code></dt>
-<dd>The number of button clicks.</dd>
-<dt><strong><code>qus_y_btn</code></strong> :&ensp;<code>int</code></dt>
-<dd>The number of button clicks.</dd>
 <dt><strong><code>switch_voxel_display</code></strong> :&ensp;<code>bool</code></dt>
 <dd>The new value.</dd>
 </dl>
@@ -3852,21 +3317,20 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
               Output(&#39;b0-dropdown&#39;, &#39;label&#39;),
               Output(&#39;b1-dropdown&#39;, &#39;label&#39;),
               Output(&#39;symmetry-dropdown&#39;, &#39;label&#39;),
-              Output(&#34;quickstart-modal&#34;, &#34;is_open&#34;),
               Output(&#34;quickstart-usermode-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;consent-modal&#34;, &#34;is_open&#34;),
               Output(&#34;nbs-err-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;eoe-modal&#34;, &#34;is_open&#34;),
-              Output(&#34;eous-modal&#34;, &#34;is_open&#34;),
               Output(&#34;rand-step-btn-div&#34;, &#34;style&#34;),
               Output(&#34;reset-btn-div&#34;, &#34;style&#34;),
-              Output(&#34;exp-progress-div&#34;, &#34;style&#34;),
-              Output(&#39;study-progress-div&#39;, &#39;style&#39;),
-              Output(&#39;download-btn&#39;, &#39;children&#39;),
               Output(&#39;content-legend-div&#39;, &#39;children&#39;),
-              Output(&#39;qus-div&#39;, &#39;style&#39;),
-              Output(&#34;eus-modal&#34;, &#34;is_open&#34;),
               Output(&#39;emitter-dropdown&#39;, &#39;label&#39;),
+              Output(&#39;sm-modal&#39;, &#39;is_open&#39;),
+              Output(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              Output(&#39;unsafemode-div&#39;, &#39;style&#39;),
+              Output(&#39;sm-modal-title&#39;, &#39;children&#39;),
+              Output(&#39;sm-modal-body&#39;, &#39;children&#39;),
+              Output(&#39;emitter-steps-div&#39;, &#39;style&#39;),
+              Output(&#39;symmetry-div&#39;, &#39;style&#39;),
+              Output(&#39;experiment-settings-div&#39;, &#39;style&#39;),
 
               State(&#39;heatmap-plot&#39;, &#39;figure&#39;),
               State(&#39;hl-rules&#39;, &#39;value&#39;),
@@ -3879,22 +3343,19 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
               State(&#39;b1-dropdown&#39;, &#39;label&#39;),
               State(&#39;symmetry-dropdown&#39;, &#39;label&#39;),
               State(&#39;emitter-dropdown&#39;, &#39;label&#39;),
-              State(&#34;quickstart-modal&#34;, &#34;is_open&#34;),
               State(&#34;quickstart-usermode-modal&#34;, &#34;is_open&#34;),
-              State(&#34;consent-modal&#34;, &#34;is_open&#34;),
               State(&#34;nbs-err-modal&#34;, &#34;is_open&#34;),
-              State(&#34;eoe-modal&#34;, &#34;is_open&#34;),
-              State(&#34;eous-modal&#34;, &#34;is_open&#34;),
               State(&#34;rand-step-btn-div&#34;, &#34;style&#34;),
               State(&#34;reset-btn-div&#34;, &#34;style&#34;),
-              State(&#34;exp-progress-div&#34;, &#34;style&#34;),
-              State(&#39;study-progress-div&#39;, &#39;style&#39;),
-              State(&#39;download-btn&#39;, &#39;children&#39;),
               State(&#39;content-legend-div&#39;, &#39;children&#39;),
-              State(&#34;eus-modal&#34;, &#34;is_open&#34;),
               State(&#39;color-picker&#39;, &#39;value&#39;),
               State(&#34;content-plot&#34;, &#34;relayoutData&#34;),
               State(&#34;voxel-preview-toggle&#34;, &#34;value&#34;),
+              State(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              State(&#39;unsafemode-div&#39;, &#39;style&#39;),
+              State(&#39;sm-modal-title&#39;, &#39;children&#39;),
+              State(&#39;sm-modal-body&#39;, &#39;children&#39;),
+              State(&#39;emitter-steps-div&#39;, &#39;style&#39;),
 
               Input(&#39;population-feasible&#39;, &#39;n_clicks&#39;),
               Input(&#39;population-infeasible&#39;, &#39;n_clicks&#39;),
@@ -3929,22 +3390,17 @@ def download_mapelites(n_clicks: int) -&gt; Dict[str, str]:
               Input(&#39;emitter-knn&#39;, &#39;n_clicks&#39;),
               Input(&#39;emitter-linkernel&#39;, &#39;n_clicks&#39;),
               Input(&#39;emitter-rbfkernel&#39;, &#39;n_clicks&#39;),
-              Input(&#34;download-btn&#34;, &#34;n_clicks&#34;),
               Input(&#39;popdownload-btn&#39;, &#39;n_clicks&#39;),
               Input(&#39;popupload-data&#39;, &#39;filename&#39;),
               Input(&#39;symmetry-none&#39;, &#39;n_clicks&#39;),
               Input(&#39;symmetry-x&#39;, &#39;n_clicks&#39;),
-              Input(&#39;symmetry-y&#39;, &#39;n_clicks&#39;),
               Input(&#39;symmetry-z&#39;, &#39;n_clicks&#39;),
-              Input(&#39;symmetry-radio&#39;, &#39;value&#39;),
-              Input(&#34;consent-yes&#34;, &#34;n_clicks&#34;),
-              Input(&#34;consent-no&#34;, &#34;n_clicks&#34;),
               Input(&#34;nbs-err-btn&#34;, &#34;n_clicks&#34;),
               Input(&#39;color-picker-btn&#39;, &#39;n_clicks&#39;),
               Input(&#39;webapp-quickstart-btn&#39;, &#39;n_clicks&#39;),
-              Input(&#39;qus-btn&#39;, &#39;n_clicks&#39;),
-              Input(&#39;qus-y-btn&#39;, &#39;n_clicks&#39;),
               Input(&#34;voxel-preview-toggle&#34;, &#34;value&#34;),
+              Input(&#34;unsaferules-mode-toggle&#34;, &#34;value&#34;),
+              Input(&#34;tsrm-y-btn&#34;, &#34;n_clicks&#34;),
               )
 def general_callback(curr_heatmap: Dict[str, Any],
                      rules: str,
@@ -3957,22 +3413,19 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      b1: str,
                      symm_axis: str,
                      emitter_name: str,
-                     qs_modal_show: bool,
                      qs_um_modal_show: bool,
-                     cm_modal_show: bool,
                      nbs_err_modal_show: bool,
-                     eoe_modal_show: bool,
-                     eous_modal_show: bool,
                      rand_step_btn_style: Dict[str, str],
                      reset_btn_style: Dict[str, str],
-                     exp_progress_style: Dict[str, str],
-                     study_style: Dict[str, str],
-                     dlbtn_label: str,
                      curr_legend: List[Any],
-                     eus_modal_show: bool,
                      color: str,
                      curr_camera: Dict[str, str],
                      curr_voxel_display: bool,
+                     curr_unsafemode: bool,
+                     curr_unsafemode_div_style: Dict[str, str],
+                     curr_unsafemode_title: str,
+                     curr_unsafemode_body: str,
+                     curr_emittersteps_style: Dict[str, str],
                      
                      pop_feas: int,
                      pop_infeas: int,
@@ -4007,22 +3460,18 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      emitter7_nclicks: int,
                      emitter8_nclicks: int,
                      emitter9_nclicks: int,
-                     n_clicks_cs_download: int,
                      n_clicks_popdownload: int,
                      upload_filename: str,
                      symm_none: int,
                      symm_x: int,
-                     symm_y: int,
                      symm_z: int,
-                     symm_orientation: str,
-                     nclicks_yes: int,
-                     nclicks_no: int,
                      nbs_btn: int,
                      color_btn: int,
                      qs_btn: int,
-                     qus_btn: int,
-                     qus_y_btn: int,
-                     switch_voxel_display: bool) -&gt; Tuple[Any, ...]:
+                     switch_voxel_display: bool,
+                     switch_unsafemode: bool,
+                     confirm_unsafemode_switch: int,
+                     prevent_initial_call=False) -&gt; Tuple[Any, ...]:
     &#34;&#34;&#34;General callback for the application.
 
     Args:
@@ -4041,15 +3490,9 @@ def general_callback(curr_heatmap: Dict[str, Any],
         qs_um_modal_show (bool): Whether the &#34;Quickstart&#34; modal (for the user mode) is currently displayed.
         cm_modal_show (bool): Whether the &#34;Privacy Policy&#34; modal is currently displayed.
         nbs_err_modal_show (bool): Whether the &#34;Warning&#34; modal is currently displayed.
-        eoe_modal_show (bool): Whether the &#34;End of Generation&#34; modal is currently displayed.
-        eous_modal_show (bool): Whether the &#34;End of User Study&#34; modal is currently displayed.
         rand_step_btn_style (Dict[str, str]): The CSS style of the &#34;Evolve from Random Spaceship&#34; button.
         reset_btn_style (Dict[str, str]): The CSS style of the &#34;Reinitialize Population&#34; button.
-        exp_progress_style (Dict[str, str]): The CSS style of the &#34;Spaceships Generation Progress&#34; progress bar container.
-        study_style (Dict[str, str]): The CSS style of the &#34;Current Iteration&#34; progress bar container.
-        dlbtn_label (str): The current label of the spaceship download button.
         curr_legend (List[Any]): The current spaceship preview legend.
-        eus_modal_show (bool): Whether the &#34;Quit User Study&#34; modal is currently displayed.
         color (str): The currently picked spaceship base blocks color.
         curr_camera (Dict[str, str]): The current spaceship preview plot camera position.
         curr_voxel_display (bool): Whether the spaceship preview plot currently uses voxels.
@@ -4099,14 +3542,13 @@ def general_callback(curr_heatmap: Dict[str, Any],
         nbs_btn (int): The number of button clicks.
         color_btn (int): The number of button clicks.
         qs_btn (int): The number of button clicks.
-        qus_btn (int): The number of button clicks.
-        qus_y_btn (int): The number of button clicks.
         switch_voxel_display (bool): The new value.
 
     Returns:
         Tuple[Any, ...]: _description_
     &#34;&#34;&#34;
     global app_settings
+    global first_launch
 
     ctx = dash.callback_context
 
@@ -4115,6 +3557,10 @@ def general_callback(curr_heatmap: Dict[str, Any],
     else:
         event_trig = ctx.triggered[0][&#39;prop_id&#39;].split(&#39;.&#39;)[0]
 
+    if event_trig is None and first_launch:
+        event_trig = &#39;reset-btn&#39;
+        first_launch = False
+    
     if event_trig not in triggers_map:
         try:
             import ast
@@ -4123,13 +3569,9 @@ def general_callback(curr_heatmap: Dict[str, Any],
         except ValueError:
             logging.getLogger(&#39;webapp&#39;).error(
                 msg=f&#39;[{__name__}.general_callback] Unrecognized {event_trig=}. No operations have been applied!&#39;)
-
-    if event_trig is None and app_settings.consent_ok is None and app_settings.app_mode == AppMode.USER:
-        event_trig = &#39;consent-no&#39;  # simulate declining privacy policy
-        app_settings.consent_ok = False
     
-    vars = locals()
-
+    vars = locals()    
+    
     output = {
         &#39;heatmap-plot.figure&#39;: curr_heatmap,
         &#39;content-plot.figure&#39;: curr_content,
@@ -4145,29 +3587,24 @@ def general_callback(curr_heatmap: Dict[str, Any],
         &#39;b0-dropdown.label&#39;: b0,
         &#39;b1-dropdown.label&#39;: b1,
         &#39;symmetry-dropdown.label&#39;: symm_axis,
-        &#39;quickstart-modal.is_open&#39;: qs_modal_show,
         &#39;quickstart-usermode-modal.is_open&#39;: qs_um_modal_show,
-        &#39;consent-modal.is_open&#39;: cm_modal_show if app_settings.app_mode is not None else True,
         &#39;nbs-err-modal.is_open&#39;: nbs_err_modal_show,
-        &#39;eoe-modal.is_open&#39;: eoe_modal_show,
-        &#39;eous-modal.is_open&#39;: eous_modal_show,
         &#39;rand-step-btn-div.style&#39;: rand_step_btn_style,
         &#39;reset-btn-div.style&#39;: reset_btn_style,
-        &#39;exp-progress-div.style&#39;: exp_progress_style,
-        &#39;study-progress-div.style&#39;: study_style,
-        &#39;download-btn.children&#39;: dlbtn_label,
         &#39;content-legend-div.children&#39;: curr_legend,
-        &#39;qus-div.style&#39;: {&#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USERSTUDY else hidden_style,
-        &#39;eus-modal.is_open&#39;: eus_modal_show,
-        &#39;emitter-dropdown.label&#39;: emitter_name
+        &#39;emitter-dropdown.label&#39;: emitter_name,
+        &#39;sm-modal.is_open&#39;: False,
+        &#39;unsaferules-mode-toggle.value&#39;: curr_unsafemode,
+        &#39;unsafemode-div.style&#39;: curr_unsafemode_div_style,
+        &#39;sm-modal-title.children&#39;: curr_unsafemode_title,
+        &#39;sm-modal-body.children&#39;: curr_unsafemode_body,
+        &#39;emitter-steps-div.style&#39;: curr_emittersteps_style,
+        &#39;symmetry-div.style&#39;: dash.no_update,
+        &#39;experiment-settings-div.style&#39;: dash.no_update
     }
 
     logging.getLogger(&#39;webapp&#39;).debug(
-        f&#39;[{__name__}.general_callback] {event_trig=}; {app_settings.exp_n=}; {app_settings.gen_counter=}; {app_settings.selected_bins=}; {app_settings.current_mapelites.emitter=}; {process_semaphore.is_locked=}&#39;)
-
-    for metric in all_metrics:
-        logging.getLogger(&#39;webapp&#39;).debug(
-            f&#39;[{__name__}.general_callback] metric={metric.name}; {metric.history=}&#39;)
+        f&#39;[{__name__}.general_callback] {event_trig=}; {app_settings.gen_counter=}; {app_settings.selected_bins=}; {app_settings.current_mapelites.emitter=}; {process_semaphore.is_locked=}&#39;)
 
     if not process_semaphore.is_locked:
         process_semaphore.lock(name=event_trig)
@@ -4267,7 +3704,7 @@ def general_callback(curr_heatmap: Dict[str, Any],
         dbc.Table: The table with the properties.
     &#34;&#34;&#34;
     size = str(cs.size) if cs else &#39;-&#39;
-    nblocks = cs.n_blocks if cs else &#39;-&#39;
+    nblocks = len(cs.content._blocks) if cs else &#39;-&#39;  # cs.n_blocks does not take into account hull
     vol = cs.content.total_volume if cs else &#39;-&#39;
     mass = cs.content.mass if cs else &#39;-&#39;
     struct_size = struct_sizes[cs.content.grid_size] if cs else &#39;-&#39;
@@ -4302,7 +3739,7 @@ def general_callback(curr_heatmap: Dict[str, Any],
 </details>
 </dd>
 <dt id="pcgsepy.guis.main_webapp.webapp.interval_updates"><code class="name flex">
-<span>def <span class="ident">interval_updates</span></span>(<span>fdis: List[Dict[str, bool]], ms: List[Dict[str, str]], lsysms: List[Dict[str, str]], symms: List[Dict[str, str]], consent_loading_data_children: List[Any], eous_loading_data_children: List[Any], eus_loading_data_children: List[Any], ni: int) ‑> Tuple[Union[bool, Dict[str, Any], List[Any]], ...]</span>
+<span>def <span class="ident">interval_updates</span></span>(<span>fdis: List[Dict[str, bool]], ms: List[Dict[str, str]], lsysms: List[Dict[str, str]], tsm_loading_data_children: List[Any], ni: int) ‑> Tuple[Union[bool, Dict[str, Any], List[Any]], ...]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Update the <code>disable</code> property of components at every interval.</p>
@@ -4314,14 +3751,6 @@ def general_callback(curr_heatmap: Dict[str, Any],
 <dd>The list of plotting methods.</dd>
 <dt><strong><code>lsysms</code></strong> :&ensp;<code>List[Dict[str, str]]</code></dt>
 <dd>The list of L-system modules.</dd>
-<dt><strong><code>symms</code></strong> :&ensp;<code>List[Dict[str, str]]</code></dt>
-<dd>The list of symmetry options.</dd>
-<dt><strong><code>consent_loading_data_children</code></strong> :&ensp;<code>List[Any]</code></dt>
-<dd>The "loading data" area of the consent modal.</dd>
-<dt><strong><code>eous_loading_data_children</code></strong> :&ensp;<code>List[Any]</code></dt>
-<dd>The "loading data" area of the "end of user study" modal.</dd>
-<dt><strong><code>eus_loading_data_children</code></strong> :&ensp;<code>List[Any]</code></dt>
-<dd>The "loading data" area of the "quit user study" modal.</dd>
 <dt><strong><code>ni</code></strong> :&ensp;<code>int</code></dt>
 <dd>The interval value.</dd>
 </dl>
@@ -4353,38 +3782,30 @@ def general_callback(curr_heatmap: Dict[str, Any],
               Output(&#39;lsystem-modules&#39;, &#39;options&#39;),
               Output(&#39;emitter-dropdown&#39;, &#39;disabled&#39;),
               Output(&#39;symmetry-dropdown&#39;, &#39;disabled&#39;),
-              Output(&#39;symmetry-radio&#39;, &#39;options&#39;),
               Output(&#39;color-picker&#39;, &#39;disabled&#39;),
               Output(&#39;heatmap-plot-container&#39;, &#39;style&#39;),
               Output({&#39;type&#39;: &#39;fitness-sldr&#39;, &#39;index&#39;: ALL}, &#39;disabled&#39;),
-              Output(&#39;qus-btn&#39;, &#39;disabled&#39;),
               Output(&#39;webapp-quickstart-btn&#39;, &#39;disabled&#39;),
               Output(&#39;webapp-info-btn&#39;, &#39;disabled&#39;),
               Output(&#39;ai-info-btn&#39;, &#39;disabled&#39;),
-              Output(&#39;qus-y-btn&#39;, &#39;disabled&#39;),
-              Output(&#39;consent-body-loading&#39;, &#39;children&#39;),
-              Output(&#39;eous-body-loading&#39;, &#39;children&#39;),
-              Output(&#39;eus-body-loading&#39;, &#39;children&#39;),
+              Output(&#39;tsrm-y-btn&#39;, &#39;disabled&#39;),
+              Output(&#39;tsm-body-loading&#39;, &#39;children&#39;),
               Output(&#39;color-picker-btn&#39;, &#39;disabled&#39;),
               Output(&#39;voxel-preview-toggle&#39;, &#39;disabled&#39;),
+              Output(&#39;unsaferules-mode-toggle&#39;, &#39;disabled&#39;),
+              Output(&#39;evo-iter-sldr&#39;, &#39;disabled&#39;),
 
               State({&#39;type&#39;: &#39;fitness-sldr&#39;, &#39;index&#39;: ALL}, &#39;disabled&#39;),
               State(&#39;method-radio&#39;, &#39;options&#39;),
               State(&#39;lsystem-modules&#39;, &#39;options&#39;),
-              State(&#39;symmetry-radio&#39;, &#39;options&#39;),
-              State(&#39;consent-body-loading&#39;, &#39;children&#39;),
-              State(&#39;eous-body-loading&#39;, &#39;children&#39;),
-              State(&#39;eus-body-loading&#39;, &#39;children&#39;),
+              State(&#39;tsm-body-loading&#39;, &#39;children&#39;),
 
               Input(&#39;interval2&#39;, &#39;n_intervals&#39;),
               )
 def interval_updates(fdis: List[Dict[str, bool]],
                      ms: List[Dict[str, str]],
                      lsysms: List[Dict[str, str]],
-                     symms: List[Dict[str, str]],
-                     consent_loading_data_children: List[Any],
-                     eous_loading_data_children: List[Any],
-                     eus_loading_data_children: List[Any],
+                     tsm_loading_data_children: List[Any],
                      ni: int) -&gt; Tuple[Union[bool, Dict[str, Any], List[Any]], ...]:
     &#34;&#34;&#34;Update the `disable` property of components at every interval.
 
@@ -4392,10 +3813,6 @@ def interval_updates(fdis: List[Dict[str, bool]],
         fdis (List[Dict[str, bool]]): The list of fitness sliders.
         ms (List[Dict[str, str]]): The list of plotting methods.
         lsysms (List[Dict[str, str]]): The list of L-system modules.
-        symms (List[Dict[str, str]]): The list of symmetry options.
-        consent_loading_data_children (List[Any]): The &#34;loading data&#34; area of the consent modal.
-        eous_loading_data_children (List[Any]): The &#34;loading data&#34; area of the &#34;end of user study&#34; modal.
-        eus_loading_data_children (List[Any]): The &#34;loading data&#34; area of the &#34;quit user study&#34; modal.
         ni (int): The interval value.
 
     Returns:
@@ -4409,13 +3826,11 @@ def interval_updates(fdis: List[Dict[str, bool]],
 
     for o in ms:
         o[&#39;disabled&#39;] = running_something
-    for o in symms:
-        o[&#39;disabled&#39;] = running_something
     for o in lsysms:
         o[&#39;disabled&#39;] = running_something
 
     btns = {
-        &#39;step-btn.disabled&#39;: running_something or (app_settings.app_mode == AppMode.USERSTUDY and app_settings.gen_counter &gt;= N_GENS_ALLOWED),
+        &#39;step-btn.disabled&#39;: running_something ,
         &#39;download-btn.disabled&#39;: running_something or download_semaphore._running == &#39;YES&#39;,
         &#39;popdownload-btn.disabled&#39;: running_something,
         &#39;rand-step-btn.disabled&#39;: running_something,
@@ -4434,7 +3849,6 @@ def interval_updates(fdis: List[Dict[str, bool]],
         &#39;lsystem-modules.options&#39;: lsysms,
         &#39;emitter-dropdown.disabled&#39;: running_something,
         &#39;symmetry-dropdown.disabled&#39;: running_something,
-        &#39;symmetry-radio.options&#39;: symms,
         &#39;color-picker.disabled&#39;: running_something,
         &#39;heatmap-plot-container.style&#39;: {&#39;visibility&#39;: &#39;visible&#39; if running_something else &#39;hidden&#39;,
                                          &#39;display&#39;: &#39;grid&#39; if running_something else &#39;none&#39;,
@@ -4442,32 +3856,21 @@ def interval_updates(fdis: List[Dict[str, bool]],
                                          &#39;pointer-events&#39;: &#39;auto&#39;,
                                          &#39;z-index&#39;: 1 if running_something else -1},
         &#39;fitness-sldr.disabled&#39;: [running_something] * len(fdis),
-        &#39;qus-btn.disabled&#39;: running_something,
         &#39;webapp-quickstart-btn.disabled&#39;: running_something,
         &#39;webapp-info-btn.disabled&#39;: running_something,
         &#39;ai-info-btn.disabled&#39;: running_something,
-        &#39;qus-y-btn.disabled&#39;: running_something,
-        &#39;consent-body-loading.children&#39;: [],
-        &#39;eous-body-loading.children&#39;: [],
-        &#39;eus-body-loading.children&#39;: [],
+        &#39;tsrm-y-btn.disabled&#39;: running_something,
+        &#39;tsm-body-loading.children&#39;: [],
         &#39;color-picker-btn.disabled&#39;: running_something,
-        &#39;voxel-preview-toggle.disabled&#39;: running_something
+        &#39;voxel-preview-toggle.disabled&#39;: running_something,
+        &#39;unsaferules-mode-toggle.disabled&#39;: running_something,
+        &#39;evo-iter-sldr.disabled&#39;: running_something,
     }
 
-    if running_something and consent_loading_data_children == []:
-        btns[&#39;consent-body-loading.children&#39;] = loading_data_component
-    elif running_something and consent_loading_data_children != []:
-        btns[&#39;consent-body-loading.children&#39;] = dash.no_update
-
-    if running_something and eous_loading_data_children == []:
-        btns[&#39;eous-body-loading.children&#39;] = loading_data_component
-    elif running_something and eous_loading_data_children != []:
-        btns[&#39;eous-body-loading.children&#39;] = dash.no_update
-
-    if running_something and eus_loading_data_children == []:
-        btns[&#39;eus-body-loading.children&#39;] = loading_data_component
-    elif running_something and eus_loading_data_children != []:
-        btns[&#39;eus-body-loading.children&#39;] = dash.no_update
+    if running_something and tsm_loading_data_children == []:
+        btns[&#39;tsm-body-loading.children&#39;] = loading_data_component
+    elif running_something and tsm_loading_data_children != []:
+        btns[&#39;tsm-body-loading.children&#39;] = dash.no_update
 
     return tuple(btns.values())</code></pre>
 </details>
@@ -4541,15 +3944,6 @@ or after being compiled to an executable with PyInstaller.</p>
     &#34;&#34;&#34;
     global app_settings
 
-    if not app_settings.app_mode:
-        app_settings.consent_ok = False if app_settings.app_mode == AppMode.DEV else None
-
-    # check if user has completed the user study already
-    if not app_settings.app_mode:
-        if os.path.isfile(os.path.join(curr_folder, &#39;.userstudyover&#39;)):
-            app_settings.consent_ok = None
-            app_settings.app_mode = AppMode.USER
-
     webapp_info_file = &#39;./assets/webapp_help_dev.md&#39; if app_settings.app_mode == AppMode.DEV else &#39;./assets/webapp_info.md&#39;
     with open(webapp_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
         webapp_info_str = f.read()
@@ -4558,64 +3952,9 @@ or after being compiled to an executable with PyInstaller.</p>
     with open(algo_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
         algo_info_str = f.read()
 
-    quickstart_info_file = &#39;./assets/quickstart.md&#39;
-    with open(quickstart_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
-        quickstart_info_str = f.read()
-
     quickstart_usermode_info_file = &#39;./assets/quickstart_usermode.md&#39;
     with open(quickstart_usermode_info_file, &#39;r&#39;, encoding=&#39;utf-8&#39;) as f:
         quickstart_usermode_info_str = f.read()
-
-    if app_settings.rngseed is None:
-        app_settings.rngseed = uuid.uuid4().int
-        logging.getLogger(&#39;webapp&#39;).info(
-            msg=f&#39;Your ID is {app_settings.rngseed}.&#39;)
-    if app_settings.app_mode is None:
-        random.seed(app_settings.rngseed)
-        app_settings.my_emitterslist = MY_EMITTERS.copy()
-        random.shuffle(app_settings.my_emitterslist)
-        app_settings.current_mapelites.emitter = _get_emitter()
-        logging.getLogger(&#39;webapp&#39;).debug(
-            msg=f&#39;[{__name__}.set_app_layout] {app_settings.app_mode=} {app_settings.rngseed=}; {app_settings.my_emitterslist=}.&#39;)
-
-    consent_dialog = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Privacy Policy&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(children=[
-            html.Div(id=&#39;body-text&#39;,
-                     children=[
-                         dcc.Markdown(privacy_policy_body,
-                                      link_target=&#34;_blank&#34;,
-                                      style={&#39;text-align&#39;: &#39;justify&#39;}),
-                         dcc.Markdown(privacy_policy_question,
-                                      style={&#39;text-align&#39;: &#39;center&#39;})
-                     ]),
-            html.Div(id=&#39;consent-body-loading&#39;,
-                     children=[])
-        ]),
-        dbc.ModalFooter(children=[
-            dbc.Button(&#34;No&#34;,
-                       disabled=False,
-                       id=&#34;consent-no&#34;,
-                       color=&#34;danger&#34;,
-                       className=&#34;ms-auto&#34;,
-                       n_clicks=0,
-                       style={&#39;width&#39;: &#39;49%&#39;}),
-            dbc.Button(&#34;Yes, and take me to the questionnaire&#34;,
-                       disabled=False,
-                       id=&#34;consent-yes&#34;,
-                       color=&#34;success&#34;,
-                       className=&#34;ms-auto&#34;,
-                       n_clicks=0,
-                       style={&#39;width&#39;: &#39;49%&#39;})
-        ])
-    ],
-        id=&#34;consent-modal&#34;,
-        centered=True,
-        backdrop=&#34;static&#34;,
-        keyboard=False,
-        is_open=False)
 
     webapp_info_modal = dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle(&#34;App Info&#34;),
@@ -4640,21 +3979,6 @@ or after being compiled to an executable with PyInstaller.</p>
                                    mathjax=True))
     ],
         id=&#39;algo-info-modal&#39;,
-        centered=True,
-        backdrop=&#39;static&#39;,
-        is_open=False,
-        scrollable=True,
-        size=&#39;lg&#39;)
-
-    quickstart_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Tutorial&#34;),
-                        style={&#39;flex-direction&#39;: &#39;column-reverse&#39;},
-                        close_button=True),
-        dbc.ModalBody(dcc.Markdown(quickstart_info_str,
-                                   link_target=&#34;_blank&#34;,
-                                   style={&#39;text-align&#39;: &#39;justify&#39;}))
-    ],
-        id=&#39;quickstart-modal&#39;,
         centered=True,
         backdrop=&#39;static&#39;,
         is_open=False,
@@ -4691,36 +4015,6 @@ or after being compiled to an executable with PyInstaller.</p>
         centered=True,
         backdrop=True,
         is_open=False)
-
-    end_of_experiment_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;End of Generation&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(dcc.Markdown(end_of_experiment,
-                                   style={&#39;text-align&#39;: &#39;justify&#39;}))
-    ],
-        id=&#39;eoe-modal&#39;,
-        centered=True,
-        backdrop=True,
-        is_open=False,
-        scrollable=True)
-
-    end_of_userstudy_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(&#34;End of User Study&#34;),
-                        style={&#39;justify-content&#39;: &#39;center&#39;},
-                        close_button=False),
-        dbc.ModalBody(children=[
-            dcc.Markdown(end_of_userstudy,
-                         style={&#39;text-align&#39;: &#39;justify&#39;}),
-            html.Div(id=&#39;eous-body-loading&#39;,
-                     children=[])
-        ])
-    ],
-        id=&#39;eous-modal&#39;,
-        centered=True,
-        backdrop=True,
-        is_open=False,
-        scrollable=True)
 
     heatmap_help_modal = dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle(&#34;Spaceship Population Help&#34;),
@@ -4761,33 +4055,34 @@ or after being compiled to an executable with PyInstaller.</p>
         is_open=False,
         scrollable=True)
 
-    exit_userstudy_modal = dbc.Modal(children=[
-        dbc.ModalHeader(dbc.ModalTitle(&#34;Quit User Study?&#34;),
+    toggle_unsaferules_modal = dbc.Modal(children=[
+        dbc.ModalHeader(dbc.ModalTitle(&#34;Turn off safe mode?&#34;),
+                        id=&#39;sm-modal-title&#39;,
                         style={&#39;justify-content&#39;: &#39;center&#39;},
                         close_button=True),
         dbc.ModalBody(children=[
-            dcc.Markdown(user_study_quit_msg,
+            dcc.Markdown(toggle_safe_rules_off_msg,
+                         id=&#39;sm-modal-body&#39;,
                          style={&#39;text-align&#39;: &#39;justify&#39;}),
-            html.Div(id=&#39;eus-body-loading&#39;,
+            html.Div(id=&#39;tsm-body-loading&#39;,
                      children=[])
         ]),
         dbc.ModalFooter(children=[dbc.Button(&#34;Yes&#34;,
-                                             id=&#34;qus-y-btn&#34;,
+                                             id=&#34;tsrm-y-btn&#34;,
                                              color=&#34;primary&#34;,
                                              className=&#34;ms-auto&#34;,
                                              n_clicks=0,
                                              style={&#39;width&#39;: &#39;100%&#39;})])
     ],
-        id=&#39;eus-modal&#39;,
+        id=&#39;sm-modal&#39;,
         centered=True,
-        backdrop=True,
+        backdrop=&#39;static&#39;,
         is_open=False,
+        keyboard=False,
         scrollable=True)
 
     modals = html.Div(children=[
-        consent_dialog, webapp_info_modal, algo_info_modal, quickstart_modal, quickstart_usermode_modal,
-        no_bins_selected_modal, end_of_experiment_modal, end_of_userstudy_modal, exit_userstudy_modal,
-        heatmap_help_modal, content_help_modal, download_help_modal
+        webapp_info_modal, algo_info_modal, quickstart_usermode_modal, no_bins_selected_modal, heatmap_help_modal, content_help_modal, download_help_modal, toggle_unsaferules_modal
     ])
 
     header = dbc.Row(children=[
@@ -4832,22 +4127,6 @@ or after being compiled to an executable with PyInstaller.</p>
         className=&#39;header&#39;,
         style={&#39;content-justify&#39;: &#39;center&#39;})
 
-    quit_user_study_div = html.Div(
-        dbc.Row(
-            dbc.Col(children=[
-                    dbc.Button(&#39;Quit User Study&#39;,
-                               id=&#39;qus-btn&#39;,
-                               className=&#39;button-fullsize&#39;,
-                               color=&#39;danger&#39;),
-                    html.Br(),
-                    html.Br()],
-                    width={&#39;size&#39;: 2, &#39;offset&#39;: 5}),
-            id=&#39;qus-div&#39;,
-            style={
-                &#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USERSTUDY else hidden_style
-        )
-    )
-
     exp_progress = html.Div(
         id=&#39;study-progress-div&#39;,
         children=[
@@ -4863,22 +4142,6 @@ or after being compiled to an executable with PyInstaller.</p>
                     width={&#39;size&#39;: 12, &#39;offset&#39;: 0},
                     style={&#39;text-align&#39;: &#39;center&#39;},
                     align=&#39;center&#39;)
-            ),
-
-            dbc.Row(
-                dbc.Col(children=[
-                    dbc.Label(f&#39;Spaceships Generation Progress&#39;,
-                              style={&#39;font-size&#39;: &#39;large&#39;}),
-                    dbc.Progress(id=&#34;exp-progress&#34;,
-                                 color=&#39;success&#39;,
-                                 striped=False,
-                                 animated=False)
-                ],
-                    width={&#39;size&#39;: 12, &#39;offset&#39;: 0},
-                    style={&#39;text-align&#39;: &#39;center&#39;} if app_settings.app_mode is None else {
-                        **{&#39;text-align&#39;: &#39;center&#39;}, **hidden_style},
-                    align=&#39;center&#39;,
-                    id=&#39;exp-progress-div&#39;)
             )
         ])
 
@@ -5002,7 +4265,7 @@ or after being compiled to an executable with PyInstaller.</p>
             dbc.Switch(
                 id=&#34;voxel-preview-toggle&#34;,
                 label=&#34;Toggle Voxel Preview&#34;,
-                value=False,
+                value=app_settings.voxelised,
             )
         ],
             style={&#39;display&#39;: &#39;inline-flex&#39;, &#39;justify-content&#39;: &#39;center&#39;}
@@ -5066,7 +4329,8 @@ or after being compiled to an executable with PyInstaller.</p>
                                 fullscreen=False,
                                 color=&#39;#eeeeee&#39;,
                                 type=&#39;default&#39;,
-                                style={&#39;justify-content&#39;: &#39;center&#39;})
+                                style={&#39;justify-content&#39;: &#39;center&#39;}),
+                    html.Br()
                 ],
                     width={&#39;size&#39;: 6, &#39;offset&#39;: 3},
                     style={&#39;text-align&#39;: &#39;center&#39;, &#39;justify-content&#39;: &#39;center&#39;})
@@ -5162,12 +4426,15 @@ or after being compiled to an executable with PyInstaller.</p>
         children=[
             html.H4(children=&#39;Experiment Settings&#39;,
                     className=&#39;section-title&#39;),
-            html.Br(),
             html.Div(children=[
-                html.P(children=f&#39;Selected bin(s): {app_settings.selected_bins}&#39;,
-                       id=&#39;selected-bin&#39;)
-            ]),
-            html.Br(),
+                 html.Br(),
+                    html.Div(children=[
+                        html.P(children=f&#39;Selected bin(s): {app_settings.selected_bins}&#39;,
+                            id=&#39;selected-bin&#39;)
+                    ]),
+                    html.Br(),
+                ],
+                    style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Feature Descriptors (X, Y):&#39;),
                 dbc.DropdownMenu(label=app_settings.current_mapelites.b_descs[0].name,
@@ -5184,7 +4451,7 @@ or after being compiled to an executable with PyInstaller.</p>
                                  id=&#39;b1-dropdown&#39;)
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Toggle L-system Modules:&#39;),
                 dbc.Checklist(id=&#39;lsystem-modules&#39;,
@@ -5195,7 +4462,7 @@ or after being compiled to an executable with PyInstaller.</p>
                               inline=True,
                               switch=True)
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Fitness Weights:&#39;),
@@ -5218,7 +4485,7 @@ or after being compiled to an executable with PyInstaller.</p>
                     ]) for i, f in enumerate(app_settings.current_mapelites.feasible_fitnesses)
                 ])
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Select Emitter:&#39;),
@@ -5246,7 +4513,7 @@ or after being compiled to an executable with PyInstaller.</p>
                                  id=&#39;emitter-dropdown&#39;)
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Enforce Symmetry:&#39;),
                 dbc.DropdownMenu(label=&#39;None&#39;,
@@ -5256,20 +4523,12 @@ or after being compiled to an executable with PyInstaller.</p>
                                      dbc.DropdownMenuItem(
                                          &#39;X-axis&#39;, id=&#39;symmetry-x&#39;),
                                      dbc.DropdownMenuItem(
-                                         &#39;Y-axis&#39;, id=&#39;symmetry-y&#39;),
-                                     dbc.DropdownMenuItem(
                                          &#39;Z-axis&#39;, id=&#39;symmetry-z&#39;),
                                  ],
-                                 id=&#39;symmetry-dropdown&#39;,
-                                 style={} if app_settings.app_mode == AppMode.DEV else hidden_style),
-                dbc.RadioItems(id=&#39;symmetry-radio&#39;,
-                               options=[
-                                   {&#39;label&#39;: &#39;Upper&#39;, &#39;value&#39;: &#39;Upper&#39;},
-                                   {&#39;label&#39;: &#39;Lower&#39;, &#39;value&#39;: &#39;Lower&#39;}
-                               ],
-                               value=&#39;Upper&#39;)
+                                 id=&#39;symmetry-dropdown&#39;),
             ],
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style,
+                style={&#39;justify-content&#39;: &#39;center&#39;},
+                id=&#39;symmetry-div&#39;,
                 className=&#34;mb-3&#34;),
             dbc.InputGroup(children=[
                 dbc.InputGroupText(&#39;Save/Load Population:&#39;),
@@ -5283,9 +4542,10 @@ or after being compiled to an executable with PyInstaller.</p>
                 ),
             ],
                 className=&#34;mb-3&#34;,
-                style={} if app_settings.app_mode == AppMode.DEV else hidden_style)
+                style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style})
         ],
-        style={} if app_settings.app_mode == AppMode.DEV else hidden_style)
+        style={&#39;justify-content&#39;: &#39;center&#39;},
+        id=&#39;experiment-settings-div&#39;)
 
     experiment_controls = html.Div(
         children=[
@@ -5306,7 +4566,7 @@ or after being compiled to an executable with PyInstaller.</p>
                                className=&#39;button-fullsize&#39;)
                 ],
                     id=&#39;rand-step-btn-div&#39;,
-                    style={} if app_settings.app_mode == AppMode.USER else hidden_style,
+                    # style={} if app_settings.app_mode == AppMode.USER else hidden_style,
                     width=6)
             ],
                 style={&#39;justify-content&#39;: &#39;center&#39;, &#39;flex-wrap&#39;: &#39;inherit&#39;}),
@@ -5322,23 +4582,54 @@ or after being compiled to an executable with PyInstaller.</p>
             dbc.Row(children=[
                 dbc.Col(children=[
                     html.Br(),
+                    dbc.Button(id=&#39;reset-btn&#39;,
+                               children=&#39;Reinitialize Population&#39;,
+                               className=&#39;button-fullsize&#39;)
+                ],
+                    id=&#39;reset-btn-div&#39;,
+                    style={&#39;justify-content&#39;: &#39;center&#39;},
+                    width={&#39;offset&#39;: 3, &#39;size&#39;: 6})]),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    html.Br(),
+                    dbc.Switch(id=&#39;unsaferules-mode-toggle&#39;,
+                               label=&#39;Toggle Safe Mode&#39;,
+                               value=app_settings.safe_mode)
+                ],
+                    width=6)],
+                id=&#39;unsafemode-div&#39;,
+                style={&#39;justify-content&#39;: &#39;center&#39;, &#39;text-align&#39;: &#39;center&#39;}),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    dbc.Label(&#39;Evolution Iterations:&#39;),
+                    dcc.Slider(min=0,
+                            max=10,
+                            step=None,
+                            value=app_settings.emitter_steps,
+                            marks={
+                                0: &#39;0&#39;,
+                                3: &#39;3&#39;,
+                                5: &#39;5&#39;,
+                                7: &#39;7&#39;,
+                                10: &#39;10&#39;
+                                },
+                            tooltip={&#34;placement&#34;: &#34;bottom&#34;,
+                                        &#34;always_visible&#34;: False},
+                            id=&#39;evo-iter-sldr&#39;)
+                    ],
+                    width=6)
+            ],
+                    id=&#39;emitter-steps-div&#39;,
+                    style={&#39;justify-content&#39;: &#39;center&#39;, &#39;text-align&#39;: &#39;center&#39;}),
+            dbc.Row(children=[
+                dbc.Col(children=[
+                    html.Br(),
                     dbc.Button(id=&#39;selection-btn&#39;,
                                children=&#39;Toggle Single Bin Selection&#39;,
                                className=&#39;button-fullsize&#39;)
                 ],
                     width=6)],
                 style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.DEV else {**{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style}),
-            dbc.Row(children=[
-                dbc.Col(children=[
-                    html.Br(),
-                    dbc.Button(id=&#39;reset-btn&#39;,
-                               children=&#39;Reinitialize Population&#39;,
-                               className=&#39;button-fullsize&#39;)
-                ],
-                    id=&#39;reset-btn-div&#39;,
-                    style={&#39;justify-content&#39;: &#39;center&#39;} if app_settings.app_mode == AppMode.USER else {
-                        **{&#39;justify-content&#39;: &#39;center&#39;}, **hidden_style},
-                    width={&#39;offset&#39;: 3, &#39;size&#39;: 6})]),
             dbc.Row(children=[
                 dbc.Col(children=[
                     html.Br(),
@@ -5428,9 +4719,6 @@ or after being compiled to an executable with PyInstaller.</p>
             modals,
             header,
             dbc.Row(children=[
-                dbc.Row(children=[
-                    quit_user_study_div
-                ]),
                 dbc.Row(children=[
                     dbc.Col(children=[
                         exp_progress,
@@ -5660,45 +4948,6 @@ def show_webapp_info(n: int) -&gt; bool:
     return True</code></pre>
 </details>
 </dd>
-<dt id="pcgsepy.guis.main_webapp.webapp.update_exp_progress"><code class="name flex">
-<span>def <span class="ident">update_exp_progress</span></span>(<span>n: int) ‑> Tuple[int, str]</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Update the <code>Spaceships Generation Progress</code> progress bar.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>n</code></strong> :&ensp;<code>int</code></dt>
-<dd>Interval time.</dd>
-</dl>
-<h2 id="returns">Returns</h2>
-<dl>
-<dt><code>Tuple[int, str]</code></dt>
-<dd>The current progress value and string percentage representation.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">@app.callback(
-    [Output(&#34;exp-progress&#34;, &#34;value&#34;),
-     Output(&#34;exp-progress&#34;, &#34;label&#34;)],
-    [Input(&#34;interval1&#34;, &#34;n_intervals&#34;)],
-    prevent_initial_call=True
-)
-def update_exp_progress(n: int) -&gt; Tuple[int, str]:
-    &#34;&#34;&#34;Update the `Spaceships Generation Progress` progress bar.
-
-    Args:
-        n (int): Interval time.
-
-    Returns:
-        Tuple[int, str]: The current progress value and string percentage representation.
-    &#34;&#34;&#34;
-    val = min(100, np.round(100 * ((1 + app_settings.exp_n) /
-              len(app_settings.my_emitterslist)), 2))
-    return val, f&#34;{min(app_settings.exp_n + 1, len(app_settings.my_emitterslist))} / {len(app_settings.my_emitterslist)}&#34;</code></pre>
-</details>
-</dd>
 <dt id="pcgsepy.guis.main_webapp.webapp.update_gen_progress"><code class="name flex">
 <span>def <span class="ident">update_gen_progress</span></span>(<span>n: int) ‑> Tuple[int, str]</span>
 </code></dt>
@@ -5733,11 +4982,7 @@ def update_gen_progress(n: int) -&gt; Tuple[int, str]:
     Returns:
         Tuple[int, str]: The current progress value and string percentage representation.
     &#34;&#34;&#34;
-    if app_settings.app_mode == AppMode.USERSTUDY:
-        val = np.round(100 * ((app_settings.gen_counter) / N_GENS_ALLOWED), 2)
-        return val, f&#34;{app_settings.gen_counter} / {N_GENS_ALLOWED}&#34;
-    else:
-        return 100, f&#34;{app_settings.gen_counter}&#34;</code></pre>
+    return 100, f&#34;{app_settings.gen_counter}&#34;</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.guis.main_webapp.webapp.update_output"><code class="name flex">
@@ -5832,7 +5077,7 @@ def update_progress(n: int) -&gt; Tuple[int, str]:
 </li>
 <li><h3><a href="#header-functions">Functions</a></h3>
 <ul class="">
-<li><code><a title="pcgsepy.guis.main_webapp.webapp.disable_privacy_modal_buttons" href="#pcgsepy.guis.main_webapp.webapp.disable_privacy_modal_buttons">disable_privacy_modal_buttons</a></code></li>
+<li><code><a title="pcgsepy.guis.main_webapp.webapp.change_emitter_steps" href="#pcgsepy.guis.main_webapp.webapp.change_emitter_steps">change_emitter_steps</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.download_content" href="#pcgsepy.guis.main_webapp.webapp.download_content">download_content</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.download_mapelites" href="#pcgsepy.guis.main_webapp.webapp.download_mapelites">download_mapelites</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.general_callback" href="#pcgsepy.guis.main_webapp.webapp.general_callback">general_callback</a></code></li>
@@ -5846,7 +5091,6 @@ def update_progress(n: int) -&gt; Tuple[int, str]:
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.show_download_help" href="#pcgsepy.guis.main_webapp.webapp.show_download_help">show_download_help</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.show_heatmap_help" href="#pcgsepy.guis.main_webapp.webapp.show_heatmap_help">show_heatmap_help</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.show_webapp_info" href="#pcgsepy.guis.main_webapp.webapp.show_webapp_info">show_webapp_info</a></code></li>
-<li><code><a title="pcgsepy.guis.main_webapp.webapp.update_exp_progress" href="#pcgsepy.guis.main_webapp.webapp.update_exp_progress">update_exp_progress</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.update_gen_progress" href="#pcgsepy.guis.main_webapp.webapp.update_gen_progress">update_gen_progress</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.update_output" href="#pcgsepy.guis.main_webapp.webapp.update_output">update_output</a></code></li>
 <li><code><a title="pcgsepy.guis.main_webapp.webapp.update_progress" href="#pcgsepy.guis.main_webapp.webapp.update_progress">update_progress</a></code></li>

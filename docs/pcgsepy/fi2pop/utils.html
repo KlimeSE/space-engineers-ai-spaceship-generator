@@ -52,8 +52,10 @@ def subdivide_solutions(lcs: List[CandidateSolution],
     lsystem.hl_solver.set_constraints(cs=lsystem.all_hl_constraints)
     lsystem.ll_solver.set_constraints(cs=lsystem.all_ll_constraints)
     removable = []
+    logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] Initial {len(lcs)=}.&#39;)
     for i, cs in enumerate(lcs):
         try:
+            _ = cs.content.as_array
             for t in [ConstraintTime.DURING, ConstraintTime.END]:
                 sat = lsystem.hl_solver._check_constraints(cs=cs,
                                                            when=t,
@@ -70,11 +72,14 @@ def subdivide_solutions(lcs: List[CandidateSolution],
                     cs.ncv += sat[ConstraintLevel.HARD_CONSTRAINT][1]
                     cs.ncv += sat[ConstraintLevel.SOFT_CONSTRAINT][1]
         except IntersectionException:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] {cs.string} removed: intersection.&#39;)
             pass
-        except MemoryError:
+        except (MemoryError, np.core._exceptions._ArrayMemoryError) as e:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] {cs.string} removed: too large ({type(e).__name__}).&#39;)
             removable.append(i)
     for i in list(reversed(removable)):
         lcs.pop(i)
+    logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] Final {len(lcs)=}.&#39;)
 
 
 def create_new_pool(population: List[CandidateSolution],
@@ -110,7 +115,7 @@ def create_new_pool(population: List[CandidateSolution],
             new_pop.remove(p1)
             p2 = roulette_wheel_selection(pop=new_pop,
                                         minimize=minimize)
-            if p1 != p2:
+            if p1.string != p2.string:
                 # crossover
                 o1, o2 = crossover(a1=p1, a2=p2, n_childs=2)
                 # set parents
@@ -140,19 +145,22 @@ def create_new_pool(population: List[CandidateSolution],
             logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: Parent: {p.string=},{p.base_color}; Offsprings: {o1.string=},{o1.base_color}; {o2.string=},{o2.base_color}&#39;)
             childs = [o1, o2]
         for o in childs:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: {len(o.string)=}; {MAX_STRING_LEN=} {len(o.string) &lt;= MAX_STRING_LEN=}&#39;)
             if MAX_STRING_LEN == -1 or len(o.string) &lt;= MAX_STRING_LEN:
                 # mutation
                 try:
                     mutate(cs=o, n_iteration=generation)
                 except EvoException as e:
                     logging.getLogger(&#39;fi2pop&#39;).error(f&#39;[{__name__}.create_new_pool] xover1p: Parent: {e=}&#39;)
-                if o not in pool:
+                logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: {o not in pool=}; {len(o.string) &lt;= MAX_STRING_LEN=}&#39;)
+                if o not in pool and (MAX_STRING_LEN == -1 or len(o.string) &lt;= MAX_STRING_LEN):
                     pool.append(o)
         if len(pool) == prev_len_pool:
             patience -= 1
         else:
             patience = GEN_PATIENCE
         if patience == 0:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] Patience limit reached ({len(pool)=}&#39;)
             break
     return pool
 
@@ -244,7 +252,7 @@ def reduce_population(population: List[CandidateSolution],
             new_pop.remove(p1)
             p2 = roulette_wheel_selection(pop=new_pop,
                                         minimize=minimize)
-            if p1 != p2:
+            if p1.string != p2.string:
                 # crossover
                 o1, o2 = crossover(a1=p1, a2=p2, n_childs=2)
                 # set parents
@@ -274,19 +282,22 @@ def reduce_population(population: List[CandidateSolution],
             logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: Parent: {p.string=},{p.base_color}; Offsprings: {o1.string=},{o1.base_color}; {o2.string=},{o2.base_color}&#39;)
             childs = [o1, o2]
         for o in childs:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: {len(o.string)=}; {MAX_STRING_LEN=} {len(o.string) &lt;= MAX_STRING_LEN=}&#39;)
             if MAX_STRING_LEN == -1 or len(o.string) &lt;= MAX_STRING_LEN:
                 # mutation
                 try:
                     mutate(cs=o, n_iteration=generation)
                 except EvoException as e:
                     logging.getLogger(&#39;fi2pop&#39;).error(f&#39;[{__name__}.create_new_pool] xover1p: Parent: {e=}&#39;)
-                if o not in pool:
+                logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] xover1p: {o not in pool=}; {len(o.string) &lt;= MAX_STRING_LEN=}&#39;)
+                if o not in pool and (MAX_STRING_LEN == -1 or len(o.string) &lt;= MAX_STRING_LEN):
                     pool.append(o)
         if len(pool) == prev_len_pool:
             patience -= 1
         else:
             patience = GEN_PATIENCE
         if patience == 0:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.create_new_pool] Patience limit reached ({len(pool)=}&#39;)
             break
     return pool</code></pre>
 </details>
@@ -359,8 +370,10 @@ def reduce_population(population: List[CandidateSolution],
     lsystem.hl_solver.set_constraints(cs=lsystem.all_hl_constraints)
     lsystem.ll_solver.set_constraints(cs=lsystem.all_ll_constraints)
     removable = []
+    logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] Initial {len(lcs)=}.&#39;)
     for i, cs in enumerate(lcs):
         try:
+            _ = cs.content.as_array
             for t in [ConstraintTime.DURING, ConstraintTime.END]:
                 sat = lsystem.hl_solver._check_constraints(cs=cs,
                                                            when=t,
@@ -377,11 +390,14 @@ def reduce_population(population: List[CandidateSolution],
                     cs.ncv += sat[ConstraintLevel.HARD_CONSTRAINT][1]
                     cs.ncv += sat[ConstraintLevel.SOFT_CONSTRAINT][1]
         except IntersectionException:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] {cs.string} removed: intersection.&#39;)
             pass
-        except MemoryError:
+        except (MemoryError, np.core._exceptions._ArrayMemoryError) as e:
+            logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] {cs.string} removed: too large ({type(e).__name__}).&#39;)
             removable.append(i)
     for i in list(reversed(removable)):
-        lcs.pop(i)</code></pre>
+        lcs.pop(i)
+    logging.getLogger(&#39;fi2pop&#39;).debug(f&#39;[{__name__}.subdivide_solutions] Final {len(lcs)=}.&#39;)</code></pre>
 </details>
 </dd>
 </dl>

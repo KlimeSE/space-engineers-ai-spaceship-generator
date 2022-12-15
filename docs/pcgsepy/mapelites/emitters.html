@@ -37,13 +37,13 @@ from pcgsepy.config import BETA_A, BETA_B, CONTEXT_IDXS, CS_MAX_AGE, N_EPOCHS, U
 from pcgsepy.mapelites.bin import MAPBin
 from pcgsepy.mapelites.buffer import Buffer, mean_merge
 from scipy.special import softmax
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.utils._testing import ignore_warnings
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.neighbors import KNeighborsRegressor
 
-logging.getLogger(&#39;mapelites&#39;).info(msg=f&#39;PyTorch set to {USE_TORCH}&#39;)
+logging.getLogger(&#39;emitter&#39;).info(msg=f&#39;PyTorch set to {USE_TORCH}&#39;)
 
 if USE_TORCH:
     from pcgsepy.nn.estimators import NonLinearEstimator, train_estimator
@@ -246,6 +246,9 @@ class GreedyEmitter(Emitter):
         self.requires_pre = True
         self._last_selected: List[List[int]] = []
     
+    def __repr__(self) -&gt; str:
+        return f&#39;{self.name}&#39;
+    
     def pick_bin(self,
                  bins: &#39;np.ndarray[MAPBin]&#39;) -&gt; List[MAPBin]:
         selected = [bins[idx] for idx in self._last_selected if bins[idx].non_empty(pop=&#39;feasible&#39;) or bins[idx].non_empty(pop=&#39;infeasbile&#39;)]
@@ -385,7 +388,7 @@ class HumanPrefMatrixEmitter(Emitter):
         valid_idxs = list(non_empty.intersection(valid_prefs))
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -395,7 +398,7 @@ class HumanPrefMatrixEmitter(Emitter):
         elif self.sampling_strategy == &#39;gibbs&#39;:
             idxs = tuple(np.asarray(valid_idxs).transpose())
             logits = softmax(self._prefs[idxs] / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             valid_bins = bins[idxs]
             sampled_bins = np.random.choice(valid_bins,
@@ -502,7 +505,7 @@ class ContextualBanditEmitter(Emitter):
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 9e-1.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to `1.`.
             sampling_decay (float, optional): The sampling decay. Defaults to 1e-1.
-            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name: str = &#39;contextual-bandit-emitter&#39;
@@ -511,7 +514,7 @@ class ContextualBanditEmitter(Emitter):
         self._n_features_context: int = n_features_context
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: Union[LinearRegression, NonLinearEstimator, MLPRegressor] = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -529,7 +532,9 @@ class ContextualBanditEmitter(Emitter):
         xs, ys = self._buffer.get()
         if self._estimator == &#39;linear&#39;:
             self.estimator = LinearRegression().fit(X=xs, y=ys)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == &#39;mlp&#39;:
             # if USE_TORCH:
             #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
@@ -539,15 +544,16 @@ class ContextualBanditEmitter(Emitter):
             #                     ys=ys,
             #                     n_epochs=20)
             # else:
-                self.estimator = MLPRegressor(hidden_layer_sizes=(100, 100),
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation=&#39;relu&#39;,
-                                              alpha=1e-4,
-                                              solver=&#39;lbfgs&#39;,
-                                              verbose=1 if logging.getLogger(&#39;mapelites&#39;).level == logging.DEBUG else 0,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
                                               max_iter=N_EPOCHS).fit(X=xs, y=ys)
-                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         else:
             raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def _extract_bin_context(self,
@@ -562,7 +568,7 @@ class ContextualBanditEmitter(Emitter):
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         for (i, j), b in np.ndenumerate(bins):
             if b.non_empty(pop=&#39;feasible&#39;):
                 self._buffer.insert(x=self._extract_bin_context(b),
@@ -578,7 +584,7 @@ class ContextualBanditEmitter(Emitter):
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -587,7 +593,7 @@ class ContextualBanditEmitter(Emitter):
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -629,10 +635,14 @@ class ContextualBanditEmitter(Emitter):
             &#39;fitted&#39;: self._fitted,
         }
         j[&#39;estimator_name&#39;] = self._estimator
-        if isinstance(self._estimator, LinearRegression):
-            j[&#39;estimator_params&#39;] = self.estimator.get_params(),
-            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
-            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        if isinstance(self.estimator, LinearRegression):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -673,6 +683,14 @@ class ContextualBanditEmitter(Emitter):
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
                 if my_args[&#39;estimator_intercept&#39;] is not None:
                     re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
             elif my_args[&#39;estimator_name&#39;] == &#39;mlp&#39;:
                 re._estimator = &#39;mlp&#39;
                 re.estimator = MLPRegressor()
@@ -703,7 +721,7 @@ class PreferenceBanditEmitter(Emitter):
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
             sampling_decay (float, optional): The sampling decay. Defaults to 0.01.
-            estimator (str, optional):  The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;.
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name: str = &#39;preference-bandit-emitter&#39;
@@ -711,7 +729,7 @@ class PreferenceBanditEmitter(Emitter):
         
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: Union[LinearRegression, NonLinearEstimator, MLPRegressor] = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -729,7 +747,9 @@ class PreferenceBanditEmitter(Emitter):
         xs, ys = self._buffer.get()
         if self._estimator == &#39;linear&#39;:
             self.estimator = LinearRegression().fit(X=xs, y=ys)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == &#39;mlp&#39;:
             # if USE_TORCH:
             #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
@@ -739,15 +759,16 @@ class PreferenceBanditEmitter(Emitter):
             #                     ys=ys,
             #                     n_epochs=20)
             # else:
-                self.estimator = MLPRegressor(hidden_layer_sizes=(100, 100),
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation=&#39;relu&#39;,
-                                              alpha=1e-4,
-                                              solver=&#39;lbfgs&#39;,
-                                              verbose=1 if logging.getLogger(&#39;mapelites&#39;).level == logging.DEBUG else 0,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
                                               max_iter=N_EPOCHS).fit(X=xs, y=ys)
-                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         else:
             raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
         
     def _predict(self,
@@ -758,7 +779,7 @@ class PreferenceBanditEmitter(Emitter):
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -776,7 +797,7 @@ class PreferenceBanditEmitter(Emitter):
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -785,7 +806,7 @@ class PreferenceBanditEmitter(Emitter):
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -806,7 +827,7 @@ class PreferenceBanditEmitter(Emitter):
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
 
     def to_json(self) -&gt; Dict[str, Any]:
@@ -829,6 +850,10 @@ class PreferenceBanditEmitter(Emitter):
             j[&#39;estimator_params&#39;] = self.estimator.get_params(),
             j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
             j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -864,6 +889,14 @@ class PreferenceBanditEmitter(Emitter):
             if my_args[&#39;estimator_name&#39;] == &#39;linear&#39;:
                 re._estimator = &#39;linear&#39;
                 re.estimator = LinearRegression()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
                 re.estimator.set_params(my_args[&#39;estimator_params&#39;])
                 if my_args[&#39;estimator_coefs&#39;] is not None:
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
@@ -922,7 +955,7 @@ class KNEmitter(Emitter):
                                              weights=&#39;distance&#39;,
                                              p=2,
                                              metric=&#39;minkowski&#39;).fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def __repr__(self) -&gt; str:
@@ -936,7 +969,7 @@ class KNEmitter(Emitter):
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -954,7 +987,7 @@ class KNEmitter(Emitter):
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -963,7 +996,7 @@ class KNEmitter(Emitter):
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -1035,6 +1068,7 @@ class KNEmitter(Emitter):
 
 class KernelEmitter(Emitter):
     def __init__(self,
+                 alpha: float = 1.0,
                  sampling_strategy: str = &#39;gibbs&#39;,
                  epsilon: float = 0.9,
                  tau: float = 1.,
@@ -1043,6 +1077,7 @@ class KernelEmitter(Emitter):
         &#34;&#34;&#34;Create a kernel-based emitter.
 
         Args:
+            alpha (float, optional): The L2 regularisation term. Defaults to 1.0.
             sampling_strategy (str, optional): The sampling strategy. Valid values are `epsilon-greedy` and `gibbs`. Defaults to &#39;gibbs&#39;.
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
@@ -1056,6 +1091,7 @@ class KernelEmitter(Emitter):
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
         self.estimator: KernelRidge = None
+        self.alpha: float = alpha
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -1072,8 +1108,8 @@ class KernelEmitter(Emitter):
     def _fit(self) -&gt; None:
         xs, ys = self._buffer.get()
         self.estimator = KernelRidge(kernel=self._estimator,
-                                     alpha=1.0).fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+                                     alpha=self.alpha).fit(X=xs, y=ys)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def _predict(self,
@@ -1084,7 +1120,7 @@ class KernelEmitter(Emitter):
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -1102,7 +1138,7 @@ class KernelEmitter(Emitter):
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -1111,7 +1147,7 @@ class KernelEmitter(Emitter):
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -1132,7 +1168,7 @@ class KernelEmitter(Emitter):
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
 
     def to_json(self) -&gt; Dict[str, Any]:
@@ -1197,7 +1233,7 @@ class SimpleTabularEmitter(Emitter):
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
             sampling_decay (float, optional): The sampling decay. Defaults to 0.01.
-            estimator (str, optional):  The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;.
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name = &#39;simple-tabular-emitter&#39;
@@ -1205,7 +1241,7 @@ class SimpleTabularEmitter(Emitter):
         
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: LinearRegression = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -1223,8 +1259,31 @@ class SimpleTabularEmitter(Emitter):
     @ignore_warnings(category=ConvergenceWarning)
     def _fit(self) -&gt; None:
         xs, ys = self._buffer.get()
-        self.estimator = LinearRegression().fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        if self._estimator == &#39;linear&#39;:
+            self.estimator = LinearRegression().fit(X=xs, y=ys)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
+        elif self._estimator == &#39;mlp&#39;:
+            # if USE_TORCH:
+            #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
+            #                                         yshape=1)
+            #     train_estimator(estimator=self._estimator,
+            #                     xs=xs,
+            #                     ys=ys,
+            #                     n_epochs=20)
+            # else:
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
+                                              activation=&#39;relu&#39;,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
+                                              max_iter=N_EPOCHS).fit(X=xs, y=ys)
+        else:
+            raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
         
     def _predict(self,
@@ -1234,7 +1293,7 @@ class SimpleTabularEmitter(Emitter):
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         for (i, j), b in np.ndenumerate(bins):
             if b.non_empty(pop=&#39;feasible&#39;):
                 self._buffer.insert(x=np.asarray([i, j]),
@@ -1256,7 +1315,7 @@ class SimpleTabularEmitter(Emitter):
         predicted_prefs = self._predict(idxs=valid_idxs)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -1265,14 +1324,14 @@ class SimpleTabularEmitter(Emitter):
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
                                             replace=False,
                                             p=logits)
         elif self.sampling_strategy == &#39;thompson&#39;:
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
             logits = [np.random.beta(a=self.ts_priors[idx][&#39;a&#39;] if idx in self.ts_priors else 1,
                                      b=self.ts_priors[idx][&#39;b&#39;] if idx in self.ts_priors else 1 + self._tot_actions,
                                      size=1) for idx in valid_idxs]
@@ -1294,7 +1353,7 @@ class SimpleTabularEmitter(Emitter):
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
         self.ts_priors = {}
         self._tot_actions = 0
@@ -1322,6 +1381,10 @@ class SimpleTabularEmitter(Emitter):
             j[&#39;estimator_params&#39;] = self.estimator.get_params(),
             j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
             j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -1365,6 +1428,14 @@ class SimpleTabularEmitter(Emitter):
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
                 if my_args[&#39;estimator_intercept&#39;] is not None:
                     re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
             elif my_args[&#39;estimator_name&#39;] == &#39;mlp&#39;:
                 re._estimator = &#39;mlp&#39;
                 re.estimator = MLPRegressor()
@@ -1385,6 +1456,9 @@ class HumanEmitter(Emitter):
     def __init__(self) -&gt; None:
         super().__init__()
         self.name = &#39;human-emitter&#39;
+    
+    def __repr__(self) -&gt; str:
+        return f&#39;{self.name}&#39;
     
     def pick_bin(self,
                  bins: &#39;np.ndarray[MAPBin]&#39;) -&gt; List[MAPBin]:
@@ -1472,7 +1546,7 @@ inheritance.</p>
 <dt><strong><code>sampling_decay</code></strong> :&ensp;<code>float</code>, optional</dt>
 <dd>The sampling decay. Defaults to 1e-1.</dd>
 <dt><strong><code>estimator</code></strong> :&ensp;<code>str</code>, optional</dt>
-<dd>The estimator type. Valid values are 'linear' and 'mlp'. Defaults to 'linear'</dd>
+<dd>The estimator type. Valid values are 'linear', 'ridge', and 'mlp'. Defaults to 'linear'</dd>
 </dl></div>
 <details class="source">
 <summary>
@@ -1494,7 +1568,7 @@ inheritance.</p>
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 9e-1.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to `1.`.
             sampling_decay (float, optional): The sampling decay. Defaults to 1e-1.
-            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name: str = &#39;contextual-bandit-emitter&#39;
@@ -1503,7 +1577,7 @@ inheritance.</p>
         self._n_features_context: int = n_features_context
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: Union[LinearRegression, NonLinearEstimator, MLPRegressor] = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -1521,7 +1595,9 @@ inheritance.</p>
         xs, ys = self._buffer.get()
         if self._estimator == &#39;linear&#39;:
             self.estimator = LinearRegression().fit(X=xs, y=ys)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == &#39;mlp&#39;:
             # if USE_TORCH:
             #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
@@ -1531,15 +1607,16 @@ inheritance.</p>
             #                     ys=ys,
             #                     n_epochs=20)
             # else:
-                self.estimator = MLPRegressor(hidden_layer_sizes=(100, 100),
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation=&#39;relu&#39;,
-                                              alpha=1e-4,
-                                              solver=&#39;lbfgs&#39;,
-                                              verbose=1 if logging.getLogger(&#39;mapelites&#39;).level == logging.DEBUG else 0,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
                                               max_iter=N_EPOCHS).fit(X=xs, y=ys)
-                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         else:
             raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def _extract_bin_context(self,
@@ -1554,7 +1631,7 @@ inheritance.</p>
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         for (i, j), b in np.ndenumerate(bins):
             if b.non_empty(pop=&#39;feasible&#39;):
                 self._buffer.insert(x=self._extract_bin_context(b),
@@ -1570,7 +1647,7 @@ inheritance.</p>
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -1579,7 +1656,7 @@ inheritance.</p>
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -1621,10 +1698,14 @@ inheritance.</p>
             &#39;fitted&#39;: self._fitted,
         }
         j[&#39;estimator_name&#39;] = self._estimator
-        if isinstance(self._estimator, LinearRegression):
-            j[&#39;estimator_params&#39;] = self.estimator.get_params(),
-            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
-            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        if isinstance(self.estimator, LinearRegression):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -1660,6 +1741,14 @@ inheritance.</p>
             if my_args[&#39;estimator_name&#39;] == &#39;linear&#39;:
                 re._estimator = &#39;linear&#39;
                 re.estimator = LinearRegression()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
                 re.estimator.set_params(my_args[&#39;estimator_params&#39;])
                 if my_args[&#39;estimator_coefs&#39;] is not None:
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
@@ -1724,6 +1813,14 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;ContextualBanditEmitter&#39;:
                 re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
             if my_args[&#39;estimator_intercept&#39;] is not None:
                 re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+        elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+            re._estimator = &#39;ridge&#39;
+            re.estimator = Ridge()
+            re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+            if my_args[&#39;estimator_coefs&#39;] is not None:
+                re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+            if my_args[&#39;estimator_intercept&#39;] is not None:
+                re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
         elif my_args[&#39;estimator_name&#39;] == &#39;mlp&#39;:
             re._estimator = &#39;mlp&#39;
             re.estimator = MLPRegressor()
@@ -1761,7 +1858,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;ContextualBanditEmitter&#39;:
     predicted_prefs = self._predict(bins=valid_bins)
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -1770,7 +1867,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;ContextualBanditEmitter&#39;:
         sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
     elif self.sampling_strategy == &#39;gibbs&#39;:
         logits = softmax(predicted_prefs / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         sampled_bins = np.random.choice(valid_bins,
                                         size=len(valid_bins),
@@ -1800,7 +1897,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;ContextualBanditEmitter&#39;:
 <pre><code class="python">def pre_step(self, **kwargs) -&gt; None:
     bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
     idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+    logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
     for (i, j), b in np.ndenumerate(bins):
         if b.non_empty(pop=&#39;feasible&#39;):
             self._buffer.insert(x=self._extract_bin_context(b),
@@ -1852,10 +1949,14 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;ContextualBanditEmitter&#39;:
         &#39;fitted&#39;: self._fitted,
     }
     j[&#39;estimator_name&#39;] = self._estimator
-    if isinstance(self._estimator, LinearRegression):
-        j[&#39;estimator_params&#39;] = self.estimator.get_params(),
-        j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
-        j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+    if isinstance(self.estimator, LinearRegression):
+        j[&#39;estimator_params&#39;] = self.estimator.get_params()
+        j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+        j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
+    elif isinstance(self.estimator, Ridge):
+        j[&#39;estimator_params&#39;] = self.estimator.get_params()
+        j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+        j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
     elif isinstance(self.estimator, MLPRegressor):
         j[&#39;coefs_&#39;] = self.estimator.coefs_
         j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -2023,6 +2124,9 @@ inheritance.</p>
         self.requires_pre = True
         self._last_selected: List[List[int]] = []
     
+    def __repr__(self) -&gt; str:
+        return f&#39;{self.name}&#39;
+    
     def pick_bin(self,
                  bins: &#39;np.ndarray[MAPBin]&#39;) -&gt; List[MAPBin]:
         selected = [bins[idx] for idx in self._last_selected if bins[idx].non_empty(pop=&#39;feasible&#39;) or bins[idx].non_empty(pop=&#39;infeasbile&#39;)]
@@ -2169,6 +2273,9 @@ inheritance.</p></div>
     def __init__(self) -&gt; None:
         super().__init__()
         self.name = &#39;human-emitter&#39;
+    
+    def __repr__(self) -&gt; str:
+        return f&#39;{self.name}&#39;
     
     def pick_bin(self,
                  bins: &#39;np.ndarray[MAPBin]&#39;) -&gt; List[MAPBin]:
@@ -2339,7 +2446,7 @@ inheritance.</p>
         valid_idxs = list(non_empty.intersection(valid_prefs))
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -2349,7 +2456,7 @@ inheritance.</p>
         elif self.sampling_strategy == &#39;gibbs&#39;:
             idxs = tuple(np.asarray(valid_idxs).transpose())
             logits = softmax(self._prefs[idxs] / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             valid_bins = bins[idxs]
             sampled_bins = np.random.choice(valid_bins,
@@ -2512,7 +2619,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;HumanPrefMatrixEmitter&#39;:
     valid_idxs = list(non_empty.intersection(valid_prefs))
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -2522,7 +2629,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;HumanPrefMatrixEmitter&#39;:
     elif self.sampling_strategy == &#39;gibbs&#39;:
         idxs = tuple(np.asarray(valid_idxs).transpose())
         logits = softmax(self._prefs[idxs] / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         valid_bins = bins[idxs]
         sampled_bins = np.random.choice(valid_bins,
@@ -2691,7 +2798,7 @@ inheritance.</p>
                                              weights=&#39;distance&#39;,
                                              p=2,
                                              metric=&#39;minkowski&#39;).fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def __repr__(self) -&gt; str:
@@ -2705,7 +2812,7 @@ inheritance.</p>
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -2723,7 +2830,7 @@ inheritance.</p>
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -2732,7 +2839,7 @@ inheritance.</p>
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -2862,7 +2969,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KNEmitter&#39;:
     predicted_prefs = self._predict(bins=valid_bins)
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -2871,7 +2978,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KNEmitter&#39;:
         sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
     elif self.sampling_strategy == &#39;gibbs&#39;:
         logits = softmax(predicted_prefs / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         sampled_bins = np.random.choice(valid_bins,
                                         size=len(valid_bins),
@@ -2901,7 +3008,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KNEmitter&#39;:
 <pre><code class="python">def pre_step(self, **kwargs) -&gt; None:
     bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
     idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+    logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
     bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
     bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
     for (i, j), b in np.ndenumerate(bins):
@@ -2964,7 +3071,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KNEmitter&#39;:
 </dd>
 <dt id="pcgsepy.mapelites.emitters.KernelEmitter"><code class="flex name class">
 <span>class <span class="ident">KernelEmitter</span></span>
-<span>(</span><span>sampling_strategy: str = 'gibbs', epsilon: float = 0.9, tau: float = 1.0, sampling_decay: float = 0.01, estimator: str = 'linear')</span>
+<span>(</span><span>alpha: float = 1.0, sampling_strategy: str = 'gibbs', epsilon: float = 0.9, tau: float = 1.0, sampling_decay: float = 0.01, estimator: str = 'linear')</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Helper class that provides a standard way to create an ABC using
@@ -2972,6 +3079,8 @@ inheritance.</p>
 <p>Create a kernel-based emitter.</p>
 <h2 id="args">Args</h2>
 <dl>
+<dt><strong><code>alpha</code></strong> :&ensp;<code>float</code>, optional</dt>
+<dd>The L2 regularisation term. Defaults to 1.0.</dd>
 <dt><strong><code>sampling_strategy</code></strong> :&ensp;<code>str</code>, optional</dt>
 <dd>The sampling strategy. Valid values are <code>epsilon-greedy</code> and <code>gibbs</code>. Defaults to 'gibbs'.</dd>
 <dt><strong><code>epsilon</code></strong> :&ensp;<code>float</code>, optional</dt>
@@ -2989,6 +3098,7 @@ inheritance.</p>
 </summary>
 <pre><code class="python">class KernelEmitter(Emitter):
     def __init__(self,
+                 alpha: float = 1.0,
                  sampling_strategy: str = &#39;gibbs&#39;,
                  epsilon: float = 0.9,
                  tau: float = 1.,
@@ -2997,6 +3107,7 @@ inheritance.</p>
         &#34;&#34;&#34;Create a kernel-based emitter.
 
         Args:
+            alpha (float, optional): The L2 regularisation term. Defaults to 1.0.
             sampling_strategy (str, optional): The sampling strategy. Valid values are `epsilon-greedy` and `gibbs`. Defaults to &#39;gibbs&#39;.
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
@@ -3010,6 +3121,7 @@ inheritance.</p>
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
         self.estimator: KernelRidge = None
+        self.alpha: float = alpha
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -3026,8 +3138,8 @@ inheritance.</p>
     def _fit(self) -&gt; None:
         xs, ys = self._buffer.get()
         self.estimator = KernelRidge(kernel=self._estimator,
-                                     alpha=1.0).fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+                                     alpha=self.alpha).fit(X=xs, y=ys)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
     
     def _predict(self,
@@ -3038,7 +3150,7 @@ inheritance.</p>
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -3056,7 +3168,7 @@ inheritance.</p>
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -3065,7 +3177,7 @@ inheritance.</p>
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -3086,7 +3198,7 @@ inheritance.</p>
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
 
     def to_json(self) -&gt; Dict[str, Any]:
@@ -3199,7 +3311,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KernelEmitter&#39;:
     predicted_prefs = self._predict(bins=valid_bins)
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -3208,7 +3320,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KernelEmitter&#39;:
         sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
     elif self.sampling_strategy == &#39;gibbs&#39;:
         logits = softmax(predicted_prefs / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         sampled_bins = np.random.choice(valid_bins,
                                         size=len(valid_bins),
@@ -3238,7 +3350,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KernelEmitter&#39;:
 <pre><code class="python">def pre_step(self, **kwargs) -&gt; None:
     bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
     idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+    logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
     bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
     bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
     for (i, j), b in np.ndenumerate(bins):
@@ -3261,7 +3373,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;KernelEmitter&#39;:
     self.epsilon = self._initial_epsilon
     self.tau = self._initial_tau
     self._buffer.clear()
-    self._estimator = None
+    self.estimator = None
     self._fitted = False</code></pre>
 </details>
 </dd>
@@ -3686,7 +3798,7 @@ inheritance.</p>
 <dt><strong><code>sampling_decay</code></strong> :&ensp;<code>float</code>, optional</dt>
 <dd>The sampling decay. Defaults to 0.01.</dd>
 <dt><strong><code>estimator</code></strong> :&ensp;<code>str</code>, optional</dt>
-<dd>The estimator type. Valid values are 'linear' and 'mlp'. Defaults to 'linear'.</dd>
+<dd>The estimator type. Valid values are 'linear', 'ridge', and 'mlp'. Defaults to 'linear'</dd>
 </dl></div>
 <details class="source">
 <summary>
@@ -3706,7 +3818,7 @@ inheritance.</p>
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
             sampling_decay (float, optional): The sampling decay. Defaults to 0.01.
-            estimator (str, optional):  The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;.
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name: str = &#39;preference-bandit-emitter&#39;
@@ -3714,7 +3826,7 @@ inheritance.</p>
         
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: Union[LinearRegression, NonLinearEstimator, MLPRegressor] = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -3732,7 +3844,9 @@ inheritance.</p>
         xs, ys = self._buffer.get()
         if self._estimator == &#39;linear&#39;:
             self.estimator = LinearRegression().fit(X=xs, y=ys)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == &#39;mlp&#39;:
             # if USE_TORCH:
             #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
@@ -3742,15 +3856,16 @@ inheritance.</p>
             #                     ys=ys,
             #                     n_epochs=20)
             # else:
-                self.estimator = MLPRegressor(hidden_layer_sizes=(100, 100),
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation=&#39;relu&#39;,
-                                              alpha=1e-4,
-                                              solver=&#39;lbfgs&#39;,
-                                              verbose=1 if logging.getLogger(&#39;mapelites&#39;).level == logging.DEBUG else 0,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
                                               max_iter=N_EPOCHS).fit(X=xs, y=ys)
-                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         else:
             raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
         
     def _predict(self,
@@ -3761,7 +3876,7 @@ inheritance.</p>
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
         bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
         for (i, j), b in np.ndenumerate(bins):
@@ -3779,7 +3894,7 @@ inheritance.</p>
         predicted_prefs = self._predict(bins=valid_bins)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -3788,7 +3903,7 @@ inheritance.</p>
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
@@ -3809,7 +3924,7 @@ inheritance.</p>
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
 
     def to_json(self) -&gt; Dict[str, Any]:
@@ -3832,6 +3947,10 @@ inheritance.</p>
             j[&#39;estimator_params&#39;] = self.estimator.get_params(),
             j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
             j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -3867,6 +3986,14 @@ inheritance.</p>
             if my_args[&#39;estimator_name&#39;] == &#39;linear&#39;:
                 re._estimator = &#39;linear&#39;
                 re.estimator = LinearRegression()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
                 re.estimator.set_params(my_args[&#39;estimator_params&#39;])
                 if my_args[&#39;estimator_coefs&#39;] is not None:
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
@@ -3930,6 +4057,14 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
                 re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
             if my_args[&#39;estimator_intercept&#39;] is not None:
                 re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+        elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+            re._estimator = &#39;ridge&#39;
+            re.estimator = Ridge()
+            re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+            if my_args[&#39;estimator_coefs&#39;] is not None:
+                re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+            if my_args[&#39;estimator_intercept&#39;] is not None:
+                re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
         elif my_args[&#39;estimator_name&#39;] == &#39;mlp&#39;:
             re._estimator = &#39;mlp&#39;
             re.estimator = MLPRegressor()
@@ -3967,7 +4102,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
     predicted_prefs = self._predict(bins=valid_bins)
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -3976,7 +4111,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
         sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
     elif self.sampling_strategy == &#39;gibbs&#39;:
         logits = softmax(predicted_prefs / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         sampled_bins = np.random.choice(valid_bins,
                                         size=len(valid_bins),
@@ -4006,7 +4141,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
 <pre><code class="python">def pre_step(self, **kwargs) -&gt; None:
     bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
     idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+    logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
     bcs0 = np.cumsum([b.bin_size[0] for b in bins[0, :]])[:-1]
     bcs1 = np.cumsum([b.bin_size[1] for b in bins[:, 0]])[:-1]
     for (i, j), b in np.ndenumerate(bins):
@@ -4029,7 +4164,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
     self.epsilon = self._initial_epsilon
     self.tau = self._initial_tau
     self._buffer.clear()
-    self._estimator = None
+    self.estimator = None
     self._fitted = False</code></pre>
 </details>
 </dd>
@@ -4062,6 +4197,10 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;PreferenceBanditEmitter&#39;:
         j[&#39;estimator_params&#39;] = self.estimator.get_params(),
         j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
         j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+    elif isinstance(self.estimator, Ridge):
+        j[&#39;estimator_params&#39;] = self.estimator.get_params()
+        j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+        j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
     elif isinstance(self.estimator, MLPRegressor):
         j[&#39;coefs_&#39;] = self.estimator.coefs_
         j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -4258,7 +4397,7 @@ inheritance.</p>
 <dt><strong><code>sampling_decay</code></strong> :&ensp;<code>float</code>, optional</dt>
 <dd>The sampling decay. Defaults to 0.01.</dd>
 <dt><strong><code>estimator</code></strong> :&ensp;<code>str</code>, optional</dt>
-<dd>The estimator type. Valid values are 'linear' and 'mlp'. Defaults to 'linear'.</dd>
+<dd>The estimator type. Valid values are 'linear', 'ridge', and 'mlp'. Defaults to 'linear'</dd>
 </dl></div>
 <details class="source">
 <summary>
@@ -4278,7 +4417,7 @@ inheritance.</p>
             epsilon (float, optional): The probability threshold value used if sampling strategy is &#39;epsilon-greedy&#39;. Defaults to 0.9.
             tau (float, optional): The temperature used if sampling strategy is `gibbs`. Defaults to 1..
             sampling_decay (float, optional): The sampling decay. Defaults to 0.01.
-            estimator (str, optional):  The estimator type. Valid values are &#39;linear&#39; and &#39;mlp&#39;. Defaults to &#39;linear&#39;.
+            estimator (str, optional): The estimator type. Valid values are &#39;linear&#39;, &#39;ridge&#39;, and &#39;mlp&#39;. Defaults to &#39;linear&#39;
         &#34;&#34;&#34;
         super().__init__()
         self.name = &#39;simple-tabular-emitter&#39;
@@ -4286,7 +4425,7 @@ inheritance.</p>
         
         self._buffer: Buffer = Buffer(merge_method=mean_merge)
         self._estimator: str = estimator
-        self.estimator: LinearRegression = None
+        self.estimator: Union[LinearRegression, Ridge, NonLinearEstimator, MLPRegressor] = None
         self._fitted: bool = False
         
         self.sampling_strategy: str = sampling_strategy
@@ -4304,8 +4443,31 @@ inheritance.</p>
     @ignore_warnings(category=ConvergenceWarning)
     def _fit(self) -&gt; None:
         xs, ys = self._buffer.get()
-        self.estimator = LinearRegression().fit(X=xs, y=ys)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
+        if self._estimator == &#39;linear&#39;:
+            self.estimator = LinearRegression().fit(X=xs, y=ys)
+        elif self._estimator == &#39;ridge&#39;:
+            self.estimator = Ridge(solver=&#39;svd&#39;,
+                                   max_iter=N_EPOCHS).fit(X=xs, y=ys)
+        elif self._estimator == &#39;mlp&#39;:
+            # if USE_TORCH:
+            #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
+            #                                         yshape=1)
+            #     train_estimator(estimator=self._estimator,
+            #                     xs=xs,
+            #                     ys=ys,
+            #                     n_epochs=20)
+            # else:
+                self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
+                                              activation=&#39;relu&#39;,
+                                              alpha=1e-3,
+                                              solver=&#39;adam&#39;,
+                                            #   verbose=1 if logging.getLogger(&#39;emitter&#39;).level == logging.DEBUG else 0,
+                                              verbose=0,
+                                              max_iter=N_EPOCHS).fit(X=xs, y=ys)
+        else:
+            raise ValueError(f&#39;Unrecognized estimator type: {self._estimator}&#39;)
+        
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}&#39;)
         self._fitted = True
         
     def _predict(self,
@@ -4315,7 +4477,7 @@ inheritance.</p>
     def pre_step(self, **kwargs) -&gt; None:
         bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
         idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
         for (i, j), b in np.ndenumerate(bins):
             if b.non_empty(pop=&#39;feasible&#39;):
                 self._buffer.insert(x=np.asarray([i, j]),
@@ -4337,7 +4499,7 @@ inheritance.</p>
         predicted_prefs = self._predict(idxs=valid_idxs)
         if self.sampling_strategy == &#39;epsilon-greedy&#39;:
             p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
             self.epsilon -= self.sampling_decay * self.epsilon
             if p:
                 np.random.shuffle(valid_idxs)
@@ -4346,14 +4508,14 @@ inheritance.</p>
             sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
         elif self.sampling_strategy == &#39;gibbs&#39;:
             logits = softmax(predicted_prefs / self.tau)
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
             self.tau -= self.sampling_decay * self.tau
             sampled_bins = np.random.choice(valid_bins,
                                             size=len(valid_bins),
                                             replace=False,
                                             p=logits)
         elif self.sampling_strategy == &#39;thompson&#39;:
-            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
+            logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
             logits = [np.random.beta(a=self.ts_priors[idx][&#39;a&#39;] if idx in self.ts_priors else 1,
                                      b=self.ts_priors[idx][&#39;b&#39;] if idx in self.ts_priors else 1 + self._tot_actions,
                                      size=1) for idx in valid_idxs]
@@ -4375,7 +4537,7 @@ inheritance.</p>
         self.epsilon = self._initial_epsilon
         self.tau = self._initial_tau
         self._buffer.clear()
-        self._estimator = None
+        self.estimator = None
         self._fitted = False
         self.ts_priors = {}
         self._tot_actions = 0
@@ -4403,6 +4565,10 @@ inheritance.</p>
             j[&#39;estimator_params&#39;] = self.estimator.get_params(),
             j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
             j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+        elif isinstance(self.estimator, Ridge):
+            j[&#39;estimator_params&#39;] = self.estimator.get_params()
+            j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+            j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
         elif isinstance(self.estimator, MLPRegressor):
             j[&#39;coefs_&#39;] = self.estimator.coefs_
             j[&#39;intercepts_&#39;]: self.estimator.intercepts_
@@ -4441,6 +4607,14 @@ inheritance.</p>
             if my_args[&#39;estimator_name&#39;] == &#39;linear&#39;:
                 re._estimator = &#39;linear&#39;
                 re.estimator = LinearRegression()
+                re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+                if my_args[&#39;estimator_coefs&#39;] is not None:
+                    re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+                if my_args[&#39;estimator_intercept&#39;] is not None:
+                    re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+            elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+                re._estimator = &#39;ridge&#39;
+                re.estimator = Ridge()
                 re.estimator.set_params(my_args[&#39;estimator_params&#39;])
                 if my_args[&#39;estimator_coefs&#39;] is not None:
                     re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
@@ -4507,6 +4681,14 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
                 re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
             if my_args[&#39;estimator_intercept&#39;] is not None:
                 re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
+        elif my_args[&#39;estimator_name&#39;] == &#39;ridge&#39;:
+            re._estimator = &#39;ridge&#39;
+            re.estimator = Ridge()
+            re.estimator.set_params(my_args[&#39;estimator_params&#39;])
+            if my_args[&#39;estimator_coefs&#39;] is not None:
+                re.estimator.coef_ = np.asarray(my_args[&#39;estimator_coefs&#39;])
+            if my_args[&#39;estimator_intercept&#39;] is not None:
+                re.estimator.intercept_ = np.asarray(my_args[&#39;estimator_intercept&#39;])
         elif my_args[&#39;estimator_name&#39;] == &#39;mlp&#39;:
             re._estimator = &#39;mlp&#39;
             re.estimator = MLPRegressor()
@@ -4544,7 +4726,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
     predicted_prefs = self._predict(idxs=valid_idxs)
     if self.sampling_strategy == &#39;epsilon-greedy&#39;:
         p = (np.random.uniform(low=0, high=1, size=1) &lt; self.epsilon)[0]
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {p=}&#39;)
         self.epsilon -= self.sampling_decay * self.epsilon
         if p:
             np.random.shuffle(valid_idxs)
@@ -4553,14 +4735,14 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
         sampled_bins = bins[tuple(np.asarray(valid_idxs).transpose())]
     elif self.sampling_strategy == &#39;gibbs&#39;:
         logits = softmax(predicted_prefs / self.tau)
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {logits=}&#39;)
         self.tau -= self.sampling_decay * self.tau
         sampled_bins = np.random.choice(valid_bins,
                                         size=len(valid_bins),
                                         replace=False,
                                         p=logits)
     elif self.sampling_strategy == &#39;thompson&#39;:
-        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
+        logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pick_bin] {self.ts_priors=}&#39;)
         logits = [np.random.beta(a=self.ts_priors[idx][&#39;a&#39;] if idx in self.ts_priors else 1,
                                  b=self.ts_priors[idx][&#39;b&#39;] if idx in self.ts_priors else 1 + self._tot_actions,
                                  size=1) for idx in valid_idxs]
@@ -4591,7 +4773,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
 <pre><code class="python">def pre_step(self, **kwargs) -&gt; None:
     bins: &#39;np.ndarray[MAPBin]&#39; = kwargs[&#39;bins&#39;]
     idxs: List[Tuple[int, int]] = [*kwargs[&#39;selected_idxs&#39;], *kwargs[&#39;expanded_idxs&#39;]]
-    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
+    logging.getLogger(&#39;emitter&#39;).debug(f&#39;[{__name__}.pre_step] {idxs=}&#39;)
     for (i, j), b in np.ndenumerate(bins):
         if b.non_empty(pop=&#39;feasible&#39;):
             self._buffer.insert(x=np.asarray([i, j]),
@@ -4618,7 +4800,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
     self.epsilon = self._initial_epsilon
     self.tau = self._initial_tau
     self._buffer.clear()
-    self._estimator = None
+    self.estimator = None
     self._fitted = False
     self.ts_priors = {}
     self._tot_actions = 0</code></pre>
@@ -4656,6 +4838,10 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;SimpleTabularEmitter&#39;:
         j[&#39;estimator_params&#39;] = self.estimator.get_params(),
         j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None,
         j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None,
+    elif isinstance(self.estimator, Ridge):
+        j[&#39;estimator_params&#39;] = self.estimator.get_params()
+        j[&#39;estimator_coefs&#39;] = self.estimator.coef_.tolist() if self._fitted else None
+        j[&#39;estimator_intercept&#39;] = np.asarray(self.estimator.intercept_).tolist() if self._fitted else None
     elif isinstance(self.estimator, MLPRegressor):
         j[&#39;coefs_&#39;] = self.estimator.coefs_
         j[&#39;intercepts_&#39;]: self.estimator.intercepts_

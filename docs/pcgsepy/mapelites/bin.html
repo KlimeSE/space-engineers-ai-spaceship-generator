@@ -133,6 +133,7 @@ class MAPBin:
         checking = f&#39;_elite_{pop}&#39;
         elite = self.get_elite(population=pop)
         if elite is not None and (self.new_elite[checking] is None or elite.string != self.new_elite[checking].string):
+            logging.getLogger(&#39;bin&#39;).debug(f&#39;[{__name__}.check_new_elite] Found new elite: {elite.string}.&#39;)
             self.new_elite[pop] = True
             self.new_elite[checking] = elite
             for cs in self._feasible if pop == &#39;feasible&#39; else self._infeasible:
@@ -362,6 +363,7 @@ class MAPBin:
         checking = f&#39;_elite_{pop}&#39;
         elite = self.get_elite(population=pop)
         if elite is not None and (self.new_elite[checking] is None or elite.string != self.new_elite[checking].string):
+            logging.getLogger(&#39;bin&#39;).debug(f&#39;[{__name__}.check_new_elite] Found new elite: {elite.string}.&#39;)
             self.new_elite[pop] = True
             self.new_elite[checking] = elite
             for cs in self._feasible if pop == &#39;feasible&#39; else self._infeasible:
@@ -586,6 +588,7 @@ def subdividable(self) -&gt; bool:
     checking = f&#39;_elite_{pop}&#39;
     elite = self.get_elite(population=pop)
     if elite is not None and (self.new_elite[checking] is None or elite.string != self.new_elite[checking].string):
+        logging.getLogger(&#39;bin&#39;).debug(f&#39;[{__name__}.check_new_elite] Found new elite: {elite.string}.&#39;)
         self.new_elite[pop] = True
         self.new_elite[checking] = elite
         for cs in self._feasible if pop == &#39;feasible&#39; else self._infeasible:

@@ -114,10 +114,6 @@ N_RUNS = config[&#39;EXPERIMENT&#39;].getint(&#39;n_runs&#39;)
 # name of the current experiment
 EXP_NAME = config[&#39;EXPERIMENT&#39;].get(&#39;exp_name&#39;)
 
-# list of emitters
-MY_EMITTERS = [f&#39;{x}.json&#39; for x in config[&#39;USER-STUDY&#39;].get(&#39;emitters_list&#39;).split(&#39;,&#39;)]
-# number of generations allowed per experiment
-N_GENS_ALLOWED = config[&#39;USER-STUDY&#39;].getint(&#39;n_generations_allowed&#39;)
 # number of automated emitters steps
 N_EMITTER_STEPS = config[&#39;USER-STUDY&#39;].getint(&#39;n_emitter_steps&#39;)
 

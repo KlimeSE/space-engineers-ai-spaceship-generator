@@ -26,7 +26,8 @@
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">import os
+<pre><code class="python">import logging
+import os
 import random
 import xml.etree.ElementTree as ET
 from typing import List, Tuple
@@ -1011,8 +1012,8 @@ def convert_structure_to_xml(structure: Structure,
                  &lt;/ShipBlueprints&gt;
          &lt;/Definitions&gt;&#34;&#34;&#34;
 
-    cube_blocks = &#39;&#39;.join([block_xml[block.block_type](
-        block) for block in structure._blocks.values() if block_xml.get(block.block_type, None)])
+    cube_blocks = &#39;&#39;.join([block_xml[block.block_type](block) for block in structure._blocks.values() if block_xml.get(block.block_type, None)])
+    logging.getLogger(&#39;xmlconversion&#39;).debug(f&#39;[{__name__}.convert_structure_to_xml] Structure converted to XML.&#39;)
     return f&#39;{header}{cube_blocks}{footer}&#39;</code></pre>
 </details>
 </section>
@@ -1759,8 +1760,8 @@ def convert_structure_to_xml(structure: Structure,
                  &lt;/ShipBlueprints&gt;
          &lt;/Definitions&gt;&#34;&#34;&#34;
 
-    cube_blocks = &#39;&#39;.join([block_xml[block.block_type](
-        block) for block in structure._blocks.values() if block_xml.get(block.block_type, None)])
+    cube_blocks = &#39;&#39;.join([block_xml[block.block_type](block) for block in structure._blocks.values() if block_xml.get(block.block_type, None)])
+    logging.getLogger(&#39;xmlconversion&#39;).debug(f&#39;[{__name__}.convert_structure_to_xml] Structure converted to XML.&#39;)
     return f&#39;{header}{cube_blocks}{footer}&#39;</code></pre>
 </details>
 </dd>

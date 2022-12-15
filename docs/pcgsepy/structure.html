@@ -242,9 +242,9 @@ class Structure:
 
         self._blocks: Dict[Tuple(int, int, int), Block] = {}
         self._has_intersections: bool = None
-        self._scaled_arr: npt.NDArray[np.uint32] = None
+        self._scaled_arr: npt.NDArray[np.uint16] = None
         self._air_gridmask: npt.NDArray[np.bool8] = None
-        self._arr: npt.NDArray[np.uint32] = None
+        self._arr: npt.NDArray[np.uint16] = None
 
     def __repr__(self) -&gt; str:
         return f&#39;{self.grid_size}x Structure with {len(self._blocks.keys())} blocks&#39;
@@ -316,15 +316,15 @@ class Structure:
         return min_x, min_y, min_z
 
     @property
-    def as_array(self) -&gt; npt.NDArray[np.uint32]:
+    def as_array(self) -&gt; npt.NDArray[np.uint16]:
         &#34;&#34;&#34;Convert the structure to its equivalent NumPy array.
         Each point in the XYZ matrix represents the block type.
 
         Returns:
-            npt.NDArray[np.uint32]: The 3D NumPy array.
+            npt.NDArray[np.uint16]: The 3D NumPy array.
         &#34;&#34;&#34;
         if self._scaled_arr is None:
-            self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint32)
+            self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint16)
             for (i, j, k), block in self._blocks.items():
                 r = block.scaled_size
                 if np.sum(self._scaled_arr[i:i + r.x, j:j + r.y, k:k + r.z]) != 0:
@@ -333,15 +333,15 @@ class Structure:
         return self._scaled_arr
 
     @property
-    def as_grid_array(self) -&gt; npt.NDArray[np.uint32]:
+    def as_grid_array(self) -&gt; npt.NDArray[np.uint16]:
         &#34;&#34;&#34;Convert the structure to the grid-sized array.
         Each point in the XYZ matrix represents the block type.
 
         Returns:
-            npt.NDArray[np.uint32]: The 3D NumPy grid-sized array.
+            npt.NDArray[np.uint16]: The 3D NumPy grid-sized array.
         &#34;&#34;&#34;
         if self._arr is None:
-            self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint32)
+            self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint16)
             for r, block in self._blocks.items():
                 r = Vec.from_tuple(r).scale(v=1 / self.grid_size).to_veci().as_tuple()
                 if np.sum(self._arr[r]) != 0:
@@ -456,6 +456,7 @@ class Structure:
         self._blocks = updated_blocks
         self._scaled_arr = None
         self._arr = None
+        self._air_gridmask = None
 
     def update(self, origin: Vec,
                orientation_forward: Vec,
@@ -473,7 +474,39 @@ class Structure:
         self.orientation_up = orientation_up
         # update all blocks accordingly
         self.sanify()
+    
+    def rotate(self,
+               along: int,
+               k: int) -&gt; None:
+        &#34;&#34;&#34;Rotate the structure along an axis _k_ times ccw.
 
+        Args:
+            along (int): The axis to rotate along (0, 1, 2).
+            k (int): How many times to rotate for in the ccw direction.
+        &#34;&#34;&#34;
+        rotated_blocks = {}
+        along = along % 3
+        k = k % 4
+        if k &gt; 0:
+            for idx, block in self._blocks.items():
+                x, y, z = idx
+                if along == 0:
+                    if k == 1: p1 = Vec(x=x, y=-z, z=-y)
+                    elif k == 2: p1 = Vec(x=x, y=-y, z=z)
+                    elif k == 3: p1 = Vec(x=x, y=-z, z=y)
+                elif along == 1:
+                    if k == 1: p1 = Vec(x=z, y=y, z=x)
+                    elif k == 2: p1 = Vec(x=-x, y=y, z=-z)
+                    elif k == 3: p1 = Vec(x=-z, y=y, z=-x)
+                elif along == 2:
+                    if k == 1: p1 = Vec(x=y, y=-x, z=z)
+                    elif k == 2: p1 = Vec(x=-x, y=-y, z=z)
+                    elif k == 3: p1 = Vec(x=-y, y=x, z=z)
+                rot_idx = p1.as_tuple()
+                rotated_blocks[rot_idx] = block
+            self._blocks = rotated_blocks
+            self.sanify()
+    
     def get_all_blocks(self,
                        to_place: bool = True,
                        scaled: bool = False) -&gt; List[Block]:
@@ -1172,9 +1205,9 @@ class Structure:
 
         self._blocks: Dict[Tuple(int, int, int), Block] = {}
         self._has_intersections: bool = None
-        self._scaled_arr: npt.NDArray[np.uint32] = None
+        self._scaled_arr: npt.NDArray[np.uint16] = None
         self._air_gridmask: npt.NDArray[np.bool8] = None
-        self._arr: npt.NDArray[np.uint32] = None
+        self._arr: npt.NDArray[np.uint16] = None
 
     def __repr__(self) -&gt; str:
         return f&#39;{self.grid_size}x Structure with {len(self._blocks.keys())} blocks&#39;
@@ -1246,15 +1279,15 @@ class Structure:
         return min_x, min_y, min_z
 
     @property
-    def as_array(self) -&gt; npt.NDArray[np.uint32]:
+    def as_array(self) -&gt; npt.NDArray[np.uint16]:
         &#34;&#34;&#34;Convert the structure to its equivalent NumPy array.
         Each point in the XYZ matrix represents the block type.
 
         Returns:
-            npt.NDArray[np.uint32]: The 3D NumPy array.
+            npt.NDArray[np.uint16]: The 3D NumPy array.
         &#34;&#34;&#34;
         if self._scaled_arr is None:
-            self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint32)
+            self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint16)
             for (i, j, k), block in self._blocks.items():
                 r = block.scaled_size
                 if np.sum(self._scaled_arr[i:i + r.x, j:j + r.y, k:k + r.z]) != 0:
@@ -1263,15 +1296,15 @@ class Structure:
         return self._scaled_arr
 
     @property
-    def as_grid_array(self) -&gt; npt.NDArray[np.uint32]:
+    def as_grid_array(self) -&gt; npt.NDArray[np.uint16]:
         &#34;&#34;&#34;Convert the structure to the grid-sized array.
         Each point in the XYZ matrix represents the block type.
 
         Returns:
-            npt.NDArray[np.uint32]: The 3D NumPy grid-sized array.
+            npt.NDArray[np.uint16]: The 3D NumPy grid-sized array.
         &#34;&#34;&#34;
         if self._arr is None:
-            self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint32)
+            self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint16)
             for r, block in self._blocks.items():
                 r = Vec.from_tuple(r).scale(v=1 / self.grid_size).to_veci().as_tuple()
                 if np.sum(self._arr[r]) != 0:
@@ -1386,6 +1419,7 @@ class Structure:
         self._blocks = updated_blocks
         self._scaled_arr = None
         self._arr = None
+        self._air_gridmask = None
 
     def update(self, origin: Vec,
                orientation_forward: Vec,
@@ -1403,7 +1437,39 @@ class Structure:
         self.orientation_up = orientation_up
         # update all blocks accordingly
         self.sanify()
+    
+    def rotate(self,
+               along: int,
+               k: int) -&gt; None:
+        &#34;&#34;&#34;Rotate the structure along an axis _k_ times ccw.
 
+        Args:
+            along (int): The axis to rotate along (0, 1, 2).
+            k (int): How many times to rotate for in the ccw direction.
+        &#34;&#34;&#34;
+        rotated_blocks = {}
+        along = along % 3
+        k = k % 4
+        if k &gt; 0:
+            for idx, block in self._blocks.items():
+                x, y, z = idx
+                if along == 0:
+                    if k == 1: p1 = Vec(x=x, y=-z, z=-y)
+                    elif k == 2: p1 = Vec(x=x, y=-y, z=z)
+                    elif k == 3: p1 = Vec(x=x, y=-z, z=y)
+                elif along == 1:
+                    if k == 1: p1 = Vec(x=z, y=y, z=x)
+                    elif k == 2: p1 = Vec(x=-x, y=y, z=-z)
+                    elif k == 3: p1 = Vec(x=-z, y=y, z=-x)
+                elif along == 2:
+                    if k == 1: p1 = Vec(x=y, y=-x, z=z)
+                    elif k == 2: p1 = Vec(x=-x, y=-y, z=z)
+                    elif k == 3: p1 = Vec(x=-y, y=x, z=z)
+                rot_idx = p1.as_tuple()
+                rotated_blocks[rot_idx] = block
+            self._blocks = rotated_blocks
+            self.sanify()
+    
     def get_all_blocks(self,
                        to_place: bool = True,
                        scaled: bool = False) -&gt; List[Block]:
@@ -1548,13 +1614,13 @@ def air_blocks_gridmask(self) -&gt; npt.NDArray[np.bool8]:
     return self._air_gridmask</code></pre>
 </details>
 </dd>
-<dt id="pcgsepy.structure.Structure.as_array"><code class="name">var <span class="ident">as_array</span> : numpy.ndarray[typing.Any, numpy.dtype[numpy.uint32]]</code></dt>
+<dt id="pcgsepy.structure.Structure.as_array"><code class="name">var <span class="ident">as_array</span> : numpy.ndarray[typing.Any, numpy.dtype[numpy.uint16]]</code></dt>
 <dd>
 <div class="desc"><p>Convert the structure to its equivalent NumPy array.
 Each point in the XYZ matrix represents the block type.</p>
 <h2 id="returns">Returns</h2>
 <dl>
-<dt><code>npt.NDArray[np.uint32]</code></dt>
+<dt><code>npt.NDArray[np.uint16]</code></dt>
 <dd>The 3D NumPy array.</dd>
 </dl></div>
 <details class="source">
@@ -1562,15 +1628,15 @@ Each point in the XYZ matrix represents the block type.</p>
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@property
-def as_array(self) -&gt; npt.NDArray[np.uint32]:
+def as_array(self) -&gt; npt.NDArray[np.uint16]:
     &#34;&#34;&#34;Convert the structure to its equivalent NumPy array.
     Each point in the XYZ matrix represents the block type.
 
     Returns:
-        npt.NDArray[np.uint32]: The 3D NumPy array.
+        npt.NDArray[np.uint16]: The 3D NumPy array.
     &#34;&#34;&#34;
     if self._scaled_arr is None:
-        self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint32)
+        self._scaled_arr = np.zeros(shape=Vec.from_tuple(self._max_dims).add(v=self.grid_size).as_tuple(), dtype=np.uint16)
         for (i, j, k), block in self._blocks.items():
             r = block.scaled_size
             if np.sum(self._scaled_arr[i:i + r.x, j:j + r.y, k:k + r.z]) != 0:
@@ -1579,13 +1645,13 @@ def as_array(self) -&gt; npt.NDArray[np.uint32]:
     return self._scaled_arr</code></pre>
 </details>
 </dd>
-<dt id="pcgsepy.structure.Structure.as_grid_array"><code class="name">var <span class="ident">as_grid_array</span> : numpy.ndarray[typing.Any, numpy.dtype[numpy.uint32]]</code></dt>
+<dt id="pcgsepy.structure.Structure.as_grid_array"><code class="name">var <span class="ident">as_grid_array</span> : numpy.ndarray[typing.Any, numpy.dtype[numpy.uint16]]</code></dt>
 <dd>
 <div class="desc"><p>Convert the structure to the grid-sized array.
 Each point in the XYZ matrix represents the block type.</p>
 <h2 id="returns">Returns</h2>
 <dl>
-<dt><code>npt.NDArray[np.uint32]</code></dt>
+<dt><code>npt.NDArray[np.uint16]</code></dt>
 <dd>The 3D NumPy grid-sized array.</dd>
 </dl></div>
 <details class="source">
@@ -1593,15 +1659,15 @@ Each point in the XYZ matrix represents the block type.</p>
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@property
-def as_grid_array(self) -&gt; npt.NDArray[np.uint32]:
+def as_grid_array(self) -&gt; npt.NDArray[np.uint16]:
     &#34;&#34;&#34;Convert the structure to the grid-sized array.
     Each point in the XYZ matrix represents the block type.
 
     Returns:
-        npt.NDArray[np.uint32]: The 3D NumPy grid-sized array.
+        npt.NDArray[np.uint16]: The 3D NumPy grid-sized array.
     &#34;&#34;&#34;
     if self._arr is None:
-        self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint32)
+        self._arr = np.zeros(shape=Vec.from_tuple(self._max_dims).scale(v=1 / self.grid_size).to_veci().add(v=1).as_tuple(), dtype=np.uint16)
         for r, block in self._blocks.items():
             r = Vec.from_tuple(r).scale(v=1 / self.grid_size).to_veci().as_tuple()
             if np.sum(self._arr[r]) != 0:
@@ -1809,6 +1875,55 @@ def total_volume(self) -&gt; float:
         return all_blocks</code></pre>
 </details>
 </dd>
+<dt id="pcgsepy.structure.Structure.rotate"><code class="name flex">
+<span>def <span class="ident">rotate</span></span>(<span>self, along: int, k: int) ‑> None</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Rotate the structure along an axis <em>k</em> times ccw.</p>
+<h2 id="args">Args</h2>
+<dl>
+<dt><strong><code>along</code></strong> :&ensp;<code>int</code></dt>
+<dd>The axis to rotate along (0, 1, 2).</dd>
+<dt><strong><code>k</code></strong> :&ensp;<code>int</code></dt>
+<dd>How many times to rotate for in the ccw direction.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def rotate(self,
+           along: int,
+           k: int) -&gt; None:
+    &#34;&#34;&#34;Rotate the structure along an axis _k_ times ccw.
+
+    Args:
+        along (int): The axis to rotate along (0, 1, 2).
+        k (int): How many times to rotate for in the ccw direction.
+    &#34;&#34;&#34;
+    rotated_blocks = {}
+    along = along % 3
+    k = k % 4
+    if k &gt; 0:
+        for idx, block in self._blocks.items():
+            x, y, z = idx
+            if along == 0:
+                if k == 1: p1 = Vec(x=x, y=-z, z=-y)
+                elif k == 2: p1 = Vec(x=x, y=-y, z=z)
+                elif k == 3: p1 = Vec(x=x, y=-z, z=y)
+            elif along == 1:
+                if k == 1: p1 = Vec(x=z, y=y, z=x)
+                elif k == 2: p1 = Vec(x=-x, y=y, z=-z)
+                elif k == 3: p1 = Vec(x=-z, y=y, z=-x)
+            elif along == 2:
+                if k == 1: p1 = Vec(x=y, y=-x, z=z)
+                elif k == 2: p1 = Vec(x=-x, y=-y, z=z)
+                elif k == 3: p1 = Vec(x=-y, y=x, z=z)
+            rot_idx = p1.as_tuple()
+            rotated_blocks[rot_idx] = block
+        self._blocks = rotated_blocks
+        self.sanify()</code></pre>
+</details>
+</dd>
 <dt id="pcgsepy.structure.Structure.sanify"><code class="name flex">
 <span>def <span class="ident">sanify</span></span>(<span>self) ‑> None</span>
 </code></dt>
@@ -1829,7 +1944,8 @@ def total_volume(self) -&gt; float:
         updated_blocks[new_pos.as_tuple()] = block
     self._blocks = updated_blocks
     self._scaled_arr = None
-    self._arr = None</code></pre>
+    self._arr = None
+    self._air_gridmask = None</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.structure.Structure.set_color"><code class="name flex">
@@ -2047,6 +2163,7 @@ def total_volume(self) -&gt; float:
 <li><code><a title="pcgsepy.structure.Structure.orientation_forward" href="#pcgsepy.structure.Structure.orientation_forward">orientation_forward</a></code></li>
 <li><code><a title="pcgsepy.structure.Structure.orientation_up" href="#pcgsepy.structure.Structure.orientation_up">orientation_up</a></code></li>
 <li><code><a title="pcgsepy.structure.Structure.origin_coords" href="#pcgsepy.structure.Structure.origin_coords">origin_coords</a></code></li>
+<li><code><a title="pcgsepy.structure.Structure.rotate" href="#pcgsepy.structure.Structure.rotate">rotate</a></code></li>
 <li><code><a title="pcgsepy.structure.Structure.sanify" href="#pcgsepy.structure.Structure.sanify">sanify</a></code></li>
 <li><code><a title="pcgsepy.structure.Structure.set_color" href="#pcgsepy.structure.Structure.set_color">set_color</a></code></li>
 <li><code><a title="pcgsepy.structure.Structure.show" href="#pcgsepy.structure.Structure.show">show</a></code></li>

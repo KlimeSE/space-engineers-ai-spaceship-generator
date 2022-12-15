@@ -34,6 +34,7 @@ from typing import List, Tuple
 
 import numpy as np
 from pcgsepy.common.regex_handler import MyMatch, extract_regex
+from pcgsepy.common.str_utils import get_matching_brackets
 from pcgsepy.config import (CROSSOVER_P, MUTATION_DECAY, MUTATION_INITIAL_P,
                             PL_HIGH, PL_LOW)
 from pcgsepy.lsystem.rules import StochasticRules
@@ -156,9 +157,11 @@ def mutate(cs: CandidateSolution,
                     offset += len(rhs) - len(match.lhs_string)
                     mutated |= True
     if not mutated:
+        logging.getLogger(&#39;genops&#39;).error(f&#39;[{__name__}.mutate] No mutation could be applied to {cs.string}.&#39;)
         raise EvoException(f&#39;No mutation could be applied to {cs.string}.&#39;)
     # Update solution string
     cs.string = string_merging(ls=[x[&#39;string&#39;] for x in cs.hls_mod.values()])
+    logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.mutate] New string {cs.string=}.&#39;)
 
 
 def crossover(a1: CandidateSolution,
@@ -185,11 +188,16 @@ def crossover(a1: CandidateSolution,
             string2 = a2.hls_mod[module][&#39;string&#39;][:]
             idxs1 = get_matching_brackets(string=string1)
             idxs2 = get_matching_brackets(string=string2)
+            logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] brackets1: {len(idxs1)=}.&#39;)
+            logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] brackets2: {len(idxs2)=}.&#39;)
             if not idxs1:
                 idxs1 = [match.span() for match in atoms_re.finditer(string=string1)]
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Extended brackets1: {len(idxs1)=}.&#39;)
             if not idxs2:
                 idxs2 = [match.span() for match in atoms_re.finditer(string=string2)]
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Extended brackets2: {len(idxs2)=}.&#39;)
             if len(idxs1) == 0 or len(idxs2) == 0:
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Module {module} skipped.&#39;)
                 pass
             else:
                 ws1 = [CROSSOVER_P for _ in range(len(idxs1))]
@@ -208,55 +216,14 @@ def crossover(a1: CandidateSolution,
                     modified_string = string_merging([x[&#39;string&#39;] for x in modified_hls_mod.values()])
                     o = CandidateSolution(string=modified_string)
                     o.hls_mod = modified_hls_mod
+                    logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Added child {o.string}.&#39;)
                     childs.append(o)
                     a1.n_offspring += 1
                     a2.n_offspring += 1
     if len(childs) == 0:
-        raise EvoException(
-            f&#39;No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
-    return childs[:n_childs]
-
-
-def get_matching_brackets(string: str) -&gt; List[Tuple[int, int]]:
-    &#34;&#34;&#34;Get indexes of matching square brackets.
-
-    Args:
-        string (str): The string.
-
-    Returns:
-        List[Tuple[int, int]]: The list of pair indexes.
-    &#34;&#34;&#34;
-    brackets = []
-    for i, c in enumerate(string):
-        if c == &#39;[&#39;:
-            # find first closing bracket
-            idx_c = string.index(&#39;]&#39;, i)
-            # update closing bracket position in case of nested brackets
-            ni_o = string.find(&#39;[&#39;, i + 1)
-            while ni_o != -1 and string.find(&#39;[&#39;, ni_o) &lt; idx_c:
-                idx_c = string.index(&#39;]&#39;, idx_c + 1)
-                ni_o = string.find(&#39;[&#39;, ni_o + 1)
-            # add to list of brackets
-            brackets.append((i, idx_c))
-    return brackets
-
-
-def get_atom_indexes(string: str,
-                     atom: str) -&gt; List[Tuple[int, int]]:
-    &#34;&#34;&#34;Get the indexes of the positions of the given atom in the string.
-    Args:
-        string (str): The string.
-        atom (str): The atom.
-    Returns:
-        List[Tuple[int, int]]: The list of pair indexes.
-    &#34;&#34;&#34;
-    indexes = []
-    for i, _ in enumerate(string):
-        if string[i:].startswith(atom):
-            cb = string.find(&#39;)&#39;, i + len(atom))
-            indexes.append((i, cb))
-            i = cb
-    return indexes</code></pre>
+        logging.getLogger(&#39;genops&#39;).error(f&#39;[{__name__}.crossover] No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
+        raise EvoException(f&#39;No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
+    return childs[:n_childs]</code></pre>
 </details>
 </section>
 <section>
@@ -319,11 +286,16 @@ Note: may never terminate if <code>n_childs</code> is greater than the maximum n
             string2 = a2.hls_mod[module][&#39;string&#39;][:]
             idxs1 = get_matching_brackets(string=string1)
             idxs2 = get_matching_brackets(string=string2)
+            logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] brackets1: {len(idxs1)=}.&#39;)
+            logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] brackets2: {len(idxs2)=}.&#39;)
             if not idxs1:
                 idxs1 = [match.span() for match in atoms_re.finditer(string=string1)]
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Extended brackets1: {len(idxs1)=}.&#39;)
             if not idxs2:
                 idxs2 = [match.span() for match in atoms_re.finditer(string=string2)]
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Extended brackets2: {len(idxs2)=}.&#39;)
             if len(idxs1) == 0 or len(idxs2) == 0:
+                logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Module {module} skipped.&#39;)
                 pass
             else:
                 ws1 = [CROSSOVER_P for _ in range(len(idxs1))]
@@ -342,95 +314,14 @@ Note: may never terminate if <code>n_childs</code> is greater than the maximum n
                     modified_string = string_merging([x[&#39;string&#39;] for x in modified_hls_mod.values()])
                     o = CandidateSolution(string=modified_string)
                     o.hls_mod = modified_hls_mod
+                    logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.crossover] Added child {o.string}.&#39;)
                     childs.append(o)
                     a1.n_offspring += 1
                     a2.n_offspring += 1
     if len(childs) == 0:
-        raise EvoException(
-            f&#39;No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
+        logging.getLogger(&#39;genops&#39;).error(f&#39;[{__name__}.crossover] No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
+        raise EvoException(f&#39;No cross-over could be applied ({a1.string} w/ {a2.string}).&#39;)
     return childs[:n_childs]</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.evo.genops.get_atom_indexes"><code class="name flex">
-<span>def <span class="ident">get_atom_indexes</span></span>(<span>string: str, atom: str) ‑> List[Tuple[int, int]]</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Get the indexes of the positions of the given atom in the string.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>string</code></strong> :&ensp;<code>str</code></dt>
-<dd>The string.</dd>
-<dt><strong><code>atom</code></strong> :&ensp;<code>str</code></dt>
-<dd>The atom.</dd>
-</dl>
-<h2 id="returns">Returns</h2>
-<dl>
-<dt><code>List[Tuple[int, int]]</code></dt>
-<dd>The list of pair indexes.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def get_atom_indexes(string: str,
-                     atom: str) -&gt; List[Tuple[int, int]]:
-    &#34;&#34;&#34;Get the indexes of the positions of the given atom in the string.
-    Args:
-        string (str): The string.
-        atom (str): The atom.
-    Returns:
-        List[Tuple[int, int]]: The list of pair indexes.
-    &#34;&#34;&#34;
-    indexes = []
-    for i, _ in enumerate(string):
-        if string[i:].startswith(atom):
-            cb = string.find(&#39;)&#39;, i + len(atom))
-            indexes.append((i, cb))
-            i = cb
-    return indexes</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.evo.genops.get_matching_brackets"><code class="name flex">
-<span>def <span class="ident">get_matching_brackets</span></span>(<span>string: str) ‑> List[Tuple[int, int]]</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Get indexes of matching square brackets.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>string</code></strong> :&ensp;<code>str</code></dt>
-<dd>The string.</dd>
-</dl>
-<h2 id="returns">Returns</h2>
-<dl>
-<dt><code>List[Tuple[int, int]]</code></dt>
-<dd>The list of pair indexes.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def get_matching_brackets(string: str) -&gt; List[Tuple[int, int]]:
-    &#34;&#34;&#34;Get indexes of matching square brackets.
-
-    Args:
-        string (str): The string.
-
-    Returns:
-        List[Tuple[int, int]]: The list of pair indexes.
-    &#34;&#34;&#34;
-    brackets = []
-    for i, c in enumerate(string):
-        if c == &#39;[&#39;:
-            # find first closing bracket
-            idx_c = string.index(&#39;]&#39;, i)
-            # update closing bracket position in case of nested brackets
-            ni_o = string.find(&#39;[&#39;, i + 1)
-            while ni_o != -1 and string.find(&#39;[&#39;, ni_o) &lt; idx_c:
-                idx_c = string.index(&#39;]&#39;, idx_c + 1)
-                ni_o = string.find(&#39;[&#39;, ni_o + 1)
-            # add to list of brackets
-            brackets.append((i, idx_c))
-    return brackets</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.evo.genops.mutate"><code class="name flex">
@@ -518,9 +409,11 @@ Note: may never terminate if <code>n_childs</code> is greater than the maximum n
                     offset += len(rhs) - len(match.lhs_string)
                     mutated |= True
     if not mutated:
+        logging.getLogger(&#39;genops&#39;).error(f&#39;[{__name__}.mutate] No mutation could be applied to {cs.string}.&#39;)
         raise EvoException(f&#39;No mutation could be applied to {cs.string}.&#39;)
     # Update solution string
-    cs.string = string_merging(ls=[x[&#39;string&#39;] for x in cs.hls_mod.values()])</code></pre>
+    cs.string = string_merging(ls=[x[&#39;string&#39;] for x in cs.hls_mod.values()])
+    logging.getLogger(&#39;genops&#39;).debug(f&#39;[{__name__}.mutate] New string {cs.string=}.&#39;)</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.evo.genops.random"><code class="name flex">
@@ -673,8 +566,6 @@ trick.</p>
 <li><h3><a href="#header-functions">Functions</a></h3>
 <ul class="">
 <li><code><a title="pcgsepy.evo.genops.crossover" href="#pcgsepy.evo.genops.crossover">crossover</a></code></li>
-<li><code><a title="pcgsepy.evo.genops.get_atom_indexes" href="#pcgsepy.evo.genops.get_atom_indexes">get_atom_indexes</a></code></li>
-<li><code><a title="pcgsepy.evo.genops.get_matching_brackets" href="#pcgsepy.evo.genops.get_matching_brackets">get_matching_brackets</a></code></li>
 <li><code><a title="pcgsepy.evo.genops.mutate" href="#pcgsepy.evo.genops.mutate">mutate</a></code></li>
 <li><code><a title="pcgsepy.evo.genops.random" href="#pcgsepy.evo.genops.random">random</a></code></li>
 <li><code><a title="pcgsepy.evo.genops.roulette_wheel_selection" href="#pcgsepy.evo.genops.roulette_wheel_selection">roulette_wheel_selection</a></code></li>

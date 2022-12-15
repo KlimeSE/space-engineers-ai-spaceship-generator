@@ -29,77 +29,15 @@
 <pre><code class="python">from datetime import datetime
 from enum import Enum
 import logging
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from pcgsepy.config import BIN_POP_SIZE, CS_MAX_AGE, MY_EMITTERS
+from pcgsepy.config import BIN_POP_SIZE, CS_MAX_AGE, N_EMITTER_STEPS
 from pcgsepy.mapelites.behaviors import (BehaviorCharacterization, avg_ma,
                                          mame, mami, symmetry)
 
 from pcgsepy.mapelites.map import MAPElites
-
-
-class Metric:
-    def __init__(self,
-                 emitters: List[str],
-                 exp_n: int,
-                 name: str,
-                 multiple_values: bool = False) -&gt; None:
-        &#34;&#34;&#34;Create a `Metric` object.
-
-        Args:
-            emitters (List[str]): The list of emitters names.
-            exp_n (int): The current experiment number.
-            name (str): The name of the metric.
-            multiple_values (bool, optional): Whether this metric tracks multiple values per generation or a sum. Defaults to False.
-        &#34;&#34;&#34;
-        self.name = name
-        self.current_generation: int = 0
-        self.multiple_values = multiple_values
-        self.history: Dict[int, List[Any]] = {
-            self.current_generation: [] if multiple_values else 0
-        }
-        self.emitter_names: List[str] = [emitters[exp_n]]
-    
-    def add(self,
-            value: Any):
-        &#34;&#34;&#34;Add a new value to the current generation.
-
-        Args:
-            value (Any): The new value.
-        &#34;&#34;&#34;
-        if self.multiple_values:
-            self.history[self.current_generation].append(value)
-        else:
-            self.history[self.current_generation] += value
-    
-    def reset(self):
-        &#34;&#34;&#34;Clear the metric trackings.&#34;&#34;&#34;
-        if self.multiple_values:
-            self.history[self.current_generation] = []
-        else:
-            self.history[self.current_generation] = 0
-    
-    def new_generation(self,
-                       emitters: List[str],
-                       exp_n: int):
-        &#34;&#34;&#34;Start a new generation to track.
-
-        Args:
-            emitters (List[str]): The list of emitter names.
-            exp_n (int): The current experiment number.
-        &#34;&#34;&#34;
-        self.current_generation += 1
-        self.reset()
-        self.emitter_names.append(emitters[exp_n])
-    
-    def get_averages(self) -&gt; List[Any]:
-        &#34;&#34;&#34;Get the metric averages over the history.
-
-        Returns:
-            List[Any]: The list of averages.
-        &#34;&#34;&#34;
-        return [np.mean(l) for l in self.history.values()]
 
 
 class Semaphore:
@@ -159,7 +97,6 @@ class DashLoggerHandler(logging.StreamHandler):
 
 class AppMode(Enum):
     &#34;&#34;&#34;Enumerator for the application mode.&#34;&#34;&#34;
-    USERSTUDY = 0
     USER = 1
     DEV = 2
 
@@ -168,10 +105,8 @@ class AppSettings:
     def __init__(self) -&gt; None:
         &#34;&#34;&#34;Generate a new `AppSettings` object.&#34;&#34;&#34;
         self.current_mapelites: Optional[MAPElites] = None
-        self.exp_n: int = 0
         self.gen_counter: int = 0
         self.hm_callback_props: Dict[str, Any] = {}
-        self.my_emitterslist: List[str] = MY_EMITTERS.copy()
         self.behavior_descriptors: List[BehaviorCharacterization] = [
             BehaviorCharacterization(name=&#39;Major axis / Medium axis&#39;,
                                     func=mame,
@@ -186,12 +121,15 @@ class AppSettings:
                                     func=symmetry,
                                     bounds=(0, 1))
         ]
-        self.rngseed: int = None
+        self.rngseed = uuid.uuid4().int
         self.selected_bins: List[Tuple[int, int]] = []
         self.step_progress: int = -1
         self.use_custom_colors: bool = True
         self.app_mode: AppMode = None
-        self.consent_ok: bool = None
+        self.emitter_steps: int = N_EMITTER_STEPS
+        self.symmetry: Optional[str] = None
+        self.safe_mode: bool = True
+        self.voxelised: bool = False
 
     def initialize(self,
                    mapelites: MAPElites,
@@ -203,7 +141,7 @@ class AppSettings:
             dev_mode (bool, optional): Whether to set the application to developer mode. Defaults to False.
         &#34;&#34;&#34;
         self.current_mapelites = mapelites
-        self.app_mode = AppMode.DEV if dev_mode else self.app_mode
+        self.app_mode = AppMode.DEV if dev_mode else AppMode.USER
         self.hm_callback_props[&#39;pop&#39;] = {
             &#39;Feasible&#39;: &#39;feasible&#39;,
             &#39;Infeasible&#39;: &#39;infeasible&#39;
@@ -261,7 +199,6 @@ class AppSettings:
 </summary>
 <pre><code class="python">class AppMode(Enum):
     &#34;&#34;&#34;Enumerator for the application mode.&#34;&#34;&#34;
-    USERSTUDY = 0
     USER = 1
     DEV = 2</code></pre>
 </details>
@@ -276,10 +213,6 @@ class AppSettings:
 <div class="desc"></div>
 </dd>
 <dt id="pcgsepy.guis.utils.AppMode.USER"><code class="name">var <span class="ident">USER</span></code></dt>
-<dd>
-<div class="desc"></div>
-</dd>
-<dt id="pcgsepy.guis.utils.AppMode.USERSTUDY"><code class="name">var <span class="ident">USERSTUDY</span></code></dt>
 <dd>
 <div class="desc"></div>
 </dd>
@@ -298,10 +231,8 @@ class AppSettings:
     def __init__(self) -&gt; None:
         &#34;&#34;&#34;Generate a new `AppSettings` object.&#34;&#34;&#34;
         self.current_mapelites: Optional[MAPElites] = None
-        self.exp_n: int = 0
         self.gen_counter: int = 0
         self.hm_callback_props: Dict[str, Any] = {}
-        self.my_emitterslist: List[str] = MY_EMITTERS.copy()
         self.behavior_descriptors: List[BehaviorCharacterization] = [
             BehaviorCharacterization(name=&#39;Major axis / Medium axis&#39;,
                                     func=mame,
@@ -316,12 +247,15 @@ class AppSettings:
                                     func=symmetry,
                                     bounds=(0, 1))
         ]
-        self.rngseed: int = None
+        self.rngseed = uuid.uuid4().int
         self.selected_bins: List[Tuple[int, int]] = []
         self.step_progress: int = -1
         self.use_custom_colors: bool = True
         self.app_mode: AppMode = None
-        self.consent_ok: bool = None
+        self.emitter_steps: int = N_EMITTER_STEPS
+        self.symmetry: Optional[str] = None
+        self.safe_mode: bool = True
+        self.voxelised: bool = False
 
     def initialize(self,
                    mapelites: MAPElites,
@@ -333,7 +267,7 @@ class AppSettings:
             dev_mode (bool, optional): Whether to set the application to developer mode. Defaults to False.
         &#34;&#34;&#34;
         self.current_mapelites = mapelites
-        self.app_mode = AppMode.DEV if dev_mode else self.app_mode
+        self.app_mode = AppMode.DEV if dev_mode else AppMode.USER
         self.hm_callback_props[&#39;pop&#39;] = {
             &#39;Feasible&#39;: &#39;feasible&#39;,
             &#39;Infeasible&#39;: &#39;infeasible&#39;
@@ -397,7 +331,7 @@ class AppSettings:
         dev_mode (bool, optional): Whether to set the application to developer mode. Defaults to False.
     &#34;&#34;&#34;
     self.current_mapelites = mapelites
-    self.app_mode = AppMode.DEV if dev_mode else self.app_mode
+    self.app_mode = AppMode.DEV if dev_mode else AppMode.USER
     self.hm_callback_props[&#39;pop&#39;] = {
         &#39;Feasible&#39;: &#39;feasible&#39;,
         &#39;Infeasible&#39;: &#39;infeasible&#39;
@@ -498,190 +432,6 @@ sys.stdout or sys.stderr may be used.</p>
     t = datetime.now().strftime(&#34;%Y-%m-%d %H:%M:%S&#34;)
     msg = self.format(record)
     self.queue.append(f&#39;[{t}]\t{msg}&#39;)</code></pre>
-</details>
-</dd>
-</dl>
-</dd>
-<dt id="pcgsepy.guis.utils.Metric"><code class="flex name class">
-<span>class <span class="ident">Metric</span></span>
-<span>(</span><span>emitters: List[str], exp_n: int, name: str, multiple_values: bool = False)</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Create a <code><a title="pcgsepy.guis.utils.Metric" href="#pcgsepy.guis.utils.Metric">Metric</a></code> object.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>emitters</code></strong> :&ensp;<code>List[str]</code></dt>
-<dd>The list of emitters names.</dd>
-<dt><strong><code>exp_n</code></strong> :&ensp;<code>int</code></dt>
-<dd>The current experiment number.</dd>
-<dt><strong><code>name</code></strong> :&ensp;<code>str</code></dt>
-<dd>The name of the metric.</dd>
-<dt><strong><code>multiple_values</code></strong> :&ensp;<code>bool</code>, optional</dt>
-<dd>Whether this metric tracks multiple values per generation or a sum. Defaults to False.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">class Metric:
-    def __init__(self,
-                 emitters: List[str],
-                 exp_n: int,
-                 name: str,
-                 multiple_values: bool = False) -&gt; None:
-        &#34;&#34;&#34;Create a `Metric` object.
-
-        Args:
-            emitters (List[str]): The list of emitters names.
-            exp_n (int): The current experiment number.
-            name (str): The name of the metric.
-            multiple_values (bool, optional): Whether this metric tracks multiple values per generation or a sum. Defaults to False.
-        &#34;&#34;&#34;
-        self.name = name
-        self.current_generation: int = 0
-        self.multiple_values = multiple_values
-        self.history: Dict[int, List[Any]] = {
-            self.current_generation: [] if multiple_values else 0
-        }
-        self.emitter_names: List[str] = [emitters[exp_n]]
-    
-    def add(self,
-            value: Any):
-        &#34;&#34;&#34;Add a new value to the current generation.
-
-        Args:
-            value (Any): The new value.
-        &#34;&#34;&#34;
-        if self.multiple_values:
-            self.history[self.current_generation].append(value)
-        else:
-            self.history[self.current_generation] += value
-    
-    def reset(self):
-        &#34;&#34;&#34;Clear the metric trackings.&#34;&#34;&#34;
-        if self.multiple_values:
-            self.history[self.current_generation] = []
-        else:
-            self.history[self.current_generation] = 0
-    
-    def new_generation(self,
-                       emitters: List[str],
-                       exp_n: int):
-        &#34;&#34;&#34;Start a new generation to track.
-
-        Args:
-            emitters (List[str]): The list of emitter names.
-            exp_n (int): The current experiment number.
-        &#34;&#34;&#34;
-        self.current_generation += 1
-        self.reset()
-        self.emitter_names.append(emitters[exp_n])
-    
-    def get_averages(self) -&gt; List[Any]:
-        &#34;&#34;&#34;Get the metric averages over the history.
-
-        Returns:
-            List[Any]: The list of averages.
-        &#34;&#34;&#34;
-        return [np.mean(l) for l in self.history.values()]</code></pre>
-</details>
-<h3>Methods</h3>
-<dl>
-<dt id="pcgsepy.guis.utils.Metric.add"><code class="name flex">
-<span>def <span class="ident">add</span></span>(<span>self, value: Any)</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Add a new value to the current generation.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>value</code></strong> :&ensp;<code>Any</code></dt>
-<dd>The new value.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def add(self,
-        value: Any):
-    &#34;&#34;&#34;Add a new value to the current generation.
-
-    Args:
-        value (Any): The new value.
-    &#34;&#34;&#34;
-    if self.multiple_values:
-        self.history[self.current_generation].append(value)
-    else:
-        self.history[self.current_generation] += value</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.guis.utils.Metric.get_averages"><code class="name flex">
-<span>def <span class="ident">get_averages</span></span>(<span>self) ‑> List[Any]</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Get the metric averages over the history.</p>
-<h2 id="returns">Returns</h2>
-<dl>
-<dt><code>List[Any]</code></dt>
-<dd>The list of averages.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def get_averages(self) -&gt; List[Any]:
-    &#34;&#34;&#34;Get the metric averages over the history.
-
-    Returns:
-        List[Any]: The list of averages.
-    &#34;&#34;&#34;
-    return [np.mean(l) for l in self.history.values()]</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.guis.utils.Metric.new_generation"><code class="name flex">
-<span>def <span class="ident">new_generation</span></span>(<span>self, emitters: List[str], exp_n: int)</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Start a new generation to track.</p>
-<h2 id="args">Args</h2>
-<dl>
-<dt><strong><code>emitters</code></strong> :&ensp;<code>List[str]</code></dt>
-<dd>The list of emitter names.</dd>
-<dt><strong><code>exp_n</code></strong> :&ensp;<code>int</code></dt>
-<dd>The current experiment number.</dd>
-</dl></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def new_generation(self,
-                   emitters: List[str],
-                   exp_n: int):
-    &#34;&#34;&#34;Start a new generation to track.
-
-    Args:
-        emitters (List[str]): The list of emitter names.
-        exp_n (int): The current experiment number.
-    &#34;&#34;&#34;
-    self.current_generation += 1
-    self.reset()
-    self.emitter_names.append(emitters[exp_n])</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.guis.utils.Metric.reset"><code class="name flex">
-<span>def <span class="ident">reset</span></span>(<span>self)</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Clear the metric trackings.</p></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def reset(self):
-    &#34;&#34;&#34;Clear the metric trackings.&#34;&#34;&#34;
-    if self.multiple_values:
-        self.history[self.current_generation] = []
-    else:
-        self.history[self.current_generation] = 0</code></pre>
 </details>
 </dd>
 </dl>
@@ -826,7 +576,6 @@ def is_locked(self) -&gt; bool:
 <ul class="">
 <li><code><a title="pcgsepy.guis.utils.AppMode.DEV" href="#pcgsepy.guis.utils.AppMode.DEV">DEV</a></code></li>
 <li><code><a title="pcgsepy.guis.utils.AppMode.USER" href="#pcgsepy.guis.utils.AppMode.USER">USER</a></code></li>
-<li><code><a title="pcgsepy.guis.utils.AppMode.USERSTUDY" href="#pcgsepy.guis.utils.AppMode.USERSTUDY">USERSTUDY</a></code></li>
 </ul>
 </li>
 <li>
@@ -839,15 +588,6 @@ def is_locked(self) -&gt; bool:
 <h4><code><a title="pcgsepy.guis.utils.DashLoggerHandler" href="#pcgsepy.guis.utils.DashLoggerHandler">DashLoggerHandler</a></code></h4>
 <ul class="">
 <li><code><a title="pcgsepy.guis.utils.DashLoggerHandler.emit" href="#pcgsepy.guis.utils.DashLoggerHandler.emit">emit</a></code></li>
-</ul>
-</li>
-<li>
-<h4><code><a title="pcgsepy.guis.utils.Metric" href="#pcgsepy.guis.utils.Metric">Metric</a></code></h4>
-<ul class="">
-<li><code><a title="pcgsepy.guis.utils.Metric.add" href="#pcgsepy.guis.utils.Metric.add">add</a></code></li>
-<li><code><a title="pcgsepy.guis.utils.Metric.get_averages" href="#pcgsepy.guis.utils.Metric.get_averages">get_averages</a></code></li>
-<li><code><a title="pcgsepy.guis.utils.Metric.new_generation" href="#pcgsepy.guis.utils.Metric.new_generation">new_generation</a></code></li>
-<li><code><a title="pcgsepy.guis.utils.Metric.reset" href="#pcgsepy.guis.utils.Metric.reset">reset</a></code></li>
 </ul>
 </li>
 <li>

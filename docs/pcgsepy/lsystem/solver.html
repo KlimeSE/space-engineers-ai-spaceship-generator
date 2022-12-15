@@ -61,6 +61,7 @@ class LSolver:
                            cs: CandidateSolution,
                            n: int,
                            dc_check: bool = False) -&gt; Optional[CandidateSolution]:
+        logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._forward_expansion] Expanding {cs.string=}.&#39;)
         for i in range(n):
             cs.string = self.parser.expand(string=cs.string)
         if dc_check and len([c for c in self.constraints if c.when == ConstraintTime.DURING]) &gt; 0:
@@ -73,6 +74,7 @@ class LSolver:
                            cs: CandidateSolution,
                            when: ConstraintTime,
                            keep_track: bool = False) -&gt; Dict[ConstraintLevel, List[Union[bool, int]]]:
+        logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._check_constraints] Checking constraints on {cs.string=}.&#39;)
         sat = {
             ConstraintLevel.SOFT_CONSTRAINT: [True, 0],
             ConstraintLevel.HARD_CONSTRAINT: [True, 0],
@@ -82,7 +84,7 @@ class LSolver:
                 if c.when == when and c.level == lev:
                     s = c.constraint(cs=cs,
                                      extra_args=c.extra_args)
-                    logging.getLogger(&#39;base-logger&#39;).debug(msg=f&#39;\t{c}:\t{s}&#39;)
+                    logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._forward_expansion] \t{c}:\t{s}.&#39;)
                     sat[lev][0] &amp;= s
                     if keep_track:
                         sat[lev][1] += (
@@ -98,7 +100,7 @@ class LSolver:
         all_solutions = [CandidateSolution(string=string)]
         # forward expansion + DURING constraints check
         for i in range(iterations):
-            logging.getLogger(&#39;base-logger&#39;).info(f&#39;Expansion n.{i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
+            logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Expansion {i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
             new_all_solutions = []
             for cs in all_solutions:
                 for _ in range(strings_per_iteration):
@@ -115,7 +117,7 @@ class LSolver:
         if check_sat and len([c for c in self.constraints if c.when == ConstraintTime.END]) &gt; 0:
             to_keep = np.zeros(shape=len(all_solutions), dtype=np.bool8)
             for i, cs in enumerate(all_solutions):
-                logging.getLogger(&#39;base-logger&#39;).debug(f&#39;Finalizing string {cs.string}&#39;)
+                logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Finalizing string {cs.string}&#39;)
                 to_keep[i] = self._check_constraints(cs=cs,
                                                      when=ConstraintTime.END)[ConstraintLevel.HARD_CONSTRAINT][0]
             # remaining strings are SAT
@@ -191,6 +193,7 @@ class LSolver:
                            cs: CandidateSolution,
                            n: int,
                            dc_check: bool = False) -&gt; Optional[CandidateSolution]:
+        logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._forward_expansion] Expanding {cs.string=}.&#39;)
         for i in range(n):
             cs.string = self.parser.expand(string=cs.string)
         if dc_check and len([c for c in self.constraints if c.when == ConstraintTime.DURING]) &gt; 0:
@@ -203,6 +206,7 @@ class LSolver:
                            cs: CandidateSolution,
                            when: ConstraintTime,
                            keep_track: bool = False) -&gt; Dict[ConstraintLevel, List[Union[bool, int]]]:
+        logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._check_constraints] Checking constraints on {cs.string=}.&#39;)
         sat = {
             ConstraintLevel.SOFT_CONSTRAINT: [True, 0],
             ConstraintLevel.HARD_CONSTRAINT: [True, 0],
@@ -212,7 +216,7 @@ class LSolver:
                 if c.when == when and c.level == lev:
                     s = c.constraint(cs=cs,
                                      extra_args=c.extra_args)
-                    logging.getLogger(&#39;base-logger&#39;).debug(msg=f&#39;\t{c}:\t{s}&#39;)
+                    logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}._forward_expansion] \t{c}:\t{s}.&#39;)
                     sat[lev][0] &amp;= s
                     if keep_track:
                         sat[lev][1] += (
@@ -228,7 +232,7 @@ class LSolver:
         all_solutions = [CandidateSolution(string=string)]
         # forward expansion + DURING constraints check
         for i in range(iterations):
-            logging.getLogger(&#39;base-logger&#39;).info(f&#39;Expansion n.{i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
+            logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Expansion {i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
             new_all_solutions = []
             for cs in all_solutions:
                 for _ in range(strings_per_iteration):
@@ -245,7 +249,7 @@ class LSolver:
         if check_sat and len([c for c in self.constraints if c.when == ConstraintTime.END]) &gt; 0:
             to_keep = np.zeros(shape=len(all_solutions), dtype=np.bool8)
             for i, cs in enumerate(all_solutions):
-                logging.getLogger(&#39;base-logger&#39;).debug(f&#39;Finalizing string {cs.string}&#39;)
+                logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Finalizing string {cs.string}&#39;)
                 to_keep[i] = self._check_constraints(cs=cs,
                                                      when=ConstraintTime.END)[ConstraintLevel.HARD_CONSTRAINT][0]
             # remaining strings are SAT
@@ -331,7 +335,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;LSolver&#39;:
     all_solutions = [CandidateSolution(string=string)]
     # forward expansion + DURING constraints check
     for i in range(iterations):
-        logging.getLogger(&#39;base-logger&#39;).info(f&#39;Expansion n.{i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
+        logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Expansion {i+1}/{iterations}; current number of strings: {len(all_solutions)}&#39;)
         new_all_solutions = []
         for cs in all_solutions:
             for _ in range(strings_per_iteration):
@@ -348,7 +352,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;LSolver&#39;:
     if check_sat and len([c for c in self.constraints if c.when == ConstraintTime.END]) &gt; 0:
         to_keep = np.zeros(shape=len(all_solutions), dtype=np.bool8)
         for i, cs in enumerate(all_solutions):
-            logging.getLogger(&#39;base-logger&#39;).debug(f&#39;Finalizing string {cs.string}&#39;)
+            logging.getLogger(&#39;solver&#39;).debug(f&#39;[{__name__}.solve] Finalizing string {cs.string}&#39;)
             to_keep[i] = self._check_constraints(cs=cs,
                                                  when=ConstraintTime.END)[ConstraintLevel.HARD_CONSTRAINT][0]
         # remaining strings are SAT

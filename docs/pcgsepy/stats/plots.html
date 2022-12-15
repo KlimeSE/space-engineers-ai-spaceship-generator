@@ -52,6 +52,7 @@ def plot_rankings(samples: List[NDArray],
     df = pd.DataFrame(data=data,
                       index=names)
     ax = df.plot.barh()
+    plt.legend(bbox_to_anchor=(1,1), loc=&#34;upper left&#34;)
     plt.title(title)
     if filename:
         plt.savefig(filename)
@@ -113,6 +114,7 @@ def plot_scores(samples: List[NDArray],
     df = pd.DataFrame(data=data,
                       index=names)
     ax = df.plot.barh()
+    plt.legend(bbox_to_anchor=(1,1), loc=&#34;upper left&#34;)
     plt.title(title)
     if filename:
         plt.savefig(filename)

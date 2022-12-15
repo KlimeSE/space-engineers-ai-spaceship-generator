@@ -50,7 +50,7 @@ class MyMatch:
         return isinstance(__o, MyMatch) and (self.start &lt; __o.start or (self.start == __o.start and self.end &gt; __o.end))
     
     def __str__(self) -&gt; str:
-        return f&#39;{self.lhs=}\n\tself.span={self.start},{self.end}\n\t{self.lhs_string=}&#39;
+        return f&#39;{self.lhs=}; self.span={self.start},{self.end}; {self.lhs_string=}&#39;
     
     def __repr__(self) -&gt; str:
         return str(self)
@@ -155,7 +155,7 @@ def extract_regex(lhs: str) -&gt; str:
         return isinstance(__o, MyMatch) and (self.start &lt; __o.start or (self.start == __o.start and self.end &gt; __o.end))
     
     def __str__(self) -&gt; str:
-        return f&#39;{self.lhs=}\n\tself.span={self.start},{self.end}\n\t{self.lhs_string=}&#39;
+        return f&#39;{self.lhs=}; self.span={self.start},{self.end}; {self.lhs_string=}&#39;
     
     def __repr__(self) -&gt; str:
         return str(self)</code></pre>

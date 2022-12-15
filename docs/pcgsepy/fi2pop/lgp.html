@@ -35,7 +35,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from pcgsepy.config import (CROSSOVER_P, MUTATION_DECAY, MUTATION_INITIAL_P, N_GENS, N_RETRIES,
                             POP_SIZE)
 from pcgsepy.evo.fitness import Fitness
-from pcgsepy.evo.genops import EvoException, get_atom_indexes, get_matching_brackets, roulette_wheel_selection
+from pcgsepy.evo.genops import EvoException, roulette_wheel_selection
+from pcgsepy.common.str_utils import get_atom_indexes, get_matching_brackets
 from pcgsepy.fi2pop.utils import reduce_population, subdivide_solutions
 from pcgsepy.lsystem.actions import AtomAction
 from pcgsepy.lsystem.constraints import ConstraintLevel

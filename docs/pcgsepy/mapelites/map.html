@@ -300,7 +300,8 @@ class MAPElites:
         return cs
 
     def _prepare_cs_content(self,
-                            cs: CandidateSolution) -&gt; CandidateSolution:
+                            cs: CandidateSolution,
+                            add_hull: bool = True) -&gt; CandidateSolution:
         &#34;&#34;&#34;Prepare a candidate solution for fitness computation.
         Add a hull if possible and set the blocks colors.
 
@@ -311,13 +312,17 @@ class MAPElites:
             CandidateSolution: The updated candidate solution.
         &#34;&#34;&#34;
         # add hull if possible
-        if self.hull_builder:
+        if self.hull_builder and add_hull:
             threadsafe_hullbuilder = HullBuilder(erosion_type=self.hull_builder.erosion_type,
                                                  apply_erosion=self.hull_builder.apply_erosion,
                                                  apply_smoothing=self.hull_builder.apply_smoothing)
             threadsafe_hullbuilder.add_external_hull(structure=cs.content)
         # set the color
         cs.content.set_color(color=cs.base_color)
+        # rotate according to tileset orientation
+        # TODO: this is hardcoded, but should be read from a config file
+        cs.content.rotate(along=1, k=3)
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._prepare_cs_content] Prepared {cs.string} ({add_hull=}).&#39;)
         return cs
     
     def _set_behavior_descriptors(self,
@@ -342,7 +347,7 @@ class MAPElites:
         all_cs = []
         for (_, _), cbin in np.ndenumerate(self.bins):
             all_cs.extend([*cbin._feasible, *cbin._infeasible])
-            # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (pre) - {cbin.bin_idx=}; {cbin.new_elite=}&#39;)
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Starting subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
         # update bin sizes
         v_i, v_j = self.bin_sizes[0][i], self.bin_sizes[1][j]
         self.bin_sizes[0][i] = v_i / 2
@@ -366,9 +371,9 @@ class MAPElites:
                 x = i
                 y = j
             new_bins[m, n].new_elite = self.bins[x, y].new_elite.copy()
-            # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (post) - {(m, n)=}; {new_bins[m, n].new_elite=}&#39;)
         # assign new bin map
         self.bins = new_bins
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Completed subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
         # assign solutions to bins
         self._update_bins(lcs=all_cs)
         if isinstance(self.emitter, HumanPrefMatrixEmitter):
@@ -383,6 +388,7 @@ class MAPElites:
         &#34;&#34;&#34;
         bc0 = np.cumsum([0] + self.bin_sizes[0][:-1]) + self.b_descs[0].bounds[0]
         bc1 = np.cumsum([0] + self.bin_sizes[1][:-1]) + self.b_descs[1].bounds[0]
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._update_bins] Started updating bins...&#39;)
         for cs in lcs:
             b0, b1 = cs.b_descs
             i = np.digitize(x=[b0], bins=bc0, right=False)[0] - 1
@@ -499,22 +505,6 @@ class MAPElites:
             for cs in cbin._feasible:
                 cs.c_fitness = sum([self.feasible_fitnesses[i].weight * cs.fitness[i] for i in range(len(cs.fitness))]) + (self.nsc - cs.ncv)
 
-    def reassign_all_content(self, **kwargs) -&gt; None:
-        &#34;&#34;&#34;Reassign all content to the solutions&#34;&#34;&#34;
-        for (_, _), cbin in np.ndenumerate(self.bins):
-            for pop in [cbin._feasible, cbin._infeasible]:
-                for cs in pop:
-                    cs._content = None
-                    cs = self.lsystem._set_structure(cs=self.lsystem._add_ll_strings(cs=cs),
-                                                     make_graph=False)
-                    if cs.is_feasible:
-                        if self.hull_builder is not None:
-                            self.hull_builder.add_external_hull(structure=cs.content)
-                        if kwargs.get(&#39;sym_axis&#39;, None) is not None:
-                            enforce_symmetry(structure=cs.content,
-                                             axis=kwargs.get(&#39;sym_axis&#39;, None),
-                                             upper=kwargs.get(&#39;sym_upper&#39;, None))
-
     def generate_initial_populations(self,
                                      pop_size: int = POP_SIZE,
                                      n_retries: int = N_RETRIES) -&gt; None:
@@ -536,6 +526,8 @@ class MAPElites:
                 subdivide_solutions(lcs=solutions,
                                     lsystem=self.lsystem)
                 for cs in solutions:
+                    self._prepare_cs_content(cs=cs,
+                                             add_hull=False)
                     if cs.is_feasible and len(feasible_pop) &lt; pop_size and cs not in feasible_pop:
                         if self.hull_builder is not None:
                             self.hull_builder.add_external_hull(structure=cs._content)
@@ -616,8 +608,10 @@ class MAPElites:
                     raise NotImplementedError(f&#39;Unrecognized estimator type {type(self.estimator)}.&#39;)
             # we skip training altogether if we don&#39;t have datapoints
             except EmptyBufferException:
+                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._step] Skipped training; no datapoints in buffer.&#39;)
                 pass
             # realignment check
+            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._step] Started realignment...&#39;)
             if self.estimator.is_trained and gen % ALIGNMENT_INTERVAL == 0:
                 # Reassign previous infeasible fitnesses
                 for (_, _), cbin in np.ndenumerate(self.bins):
@@ -676,7 +670,6 @@ class MAPElites:
                     new_idx = (idx[0] + offset[0], idx[1] + offset[1])
                     if 0 &lt;= new_idx[0] &lt; self.bins.shape[0] and 0 &lt;= new_idx[1] &lt; self.bins.shape[1]:
                         pool = self.bins[new_idx]._feasible if pop == &#39;feasible&#39; else self.bins[new_idx]._infeasible
-                        logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.seek_nearest_valid] {new_idx=}; {pool=}; {len(new_pop)=}; {to_inspect=}&#39;)
                         if pool:
                             new_pop.extend(pool) 
                             break
@@ -703,6 +696,7 @@ class MAPElites:
         &#34;&#34;&#34;
         self._age_bins()
         bin_idxs = [tuple(b) for b in bin_idxs]
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Picked {bin_idxs=}.&#39;)
         chosen_bins = [self.bins[bin_idx] for bin_idx in bin_idxs]
         f_pop, i_pop = [], []
         for chosen_bin in chosen_bins:
@@ -710,11 +704,9 @@ class MAPElites:
                 assert chosen_bin in self._valid_bins(), f&#39;Bin at {chosen_bin.bin_idx} is not a valid bin.&#39;
             f_pop.extend(chosen_bin._feasible)
             i_pop.extend(chosen_bin._infeasible)
-        
         if i_pop == []:
             i_pop = self.seek_nearest_valid(bin_idxs=bin_idxs,
                                             pop=&#39;infeasible&#39;)
-        
         generated = self._step(populations=[f_pop, i_pop],
                                gen=gen)
         if generated:
@@ -728,6 +720,7 @@ class MAPElites:
             expanded_idxs = []
         s = time.perf_counter()
         if self.emitter is not None and self.emitter.requires_pre:
+            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Started {self.emitter.name} pre step.&#39;)
             self.emitter.pre_step(bins=self.bins,
                                   selected_idxs=bin_idxs,
                                   expanded_idxs=expanded_idxs,
@@ -788,7 +781,7 @@ class MAPElites:
                     ipop.extend(selected_bin._infeasible)
             else:
                 raise NotImplementedError(f&#39;Unrecognized emitter output: {selected_bins}.&#39;)
-            logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {fpop=}; {ipop=}&#39;)
+            logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {len(fpop)=}; {len(ipop)=}&#39;)
             if ipop == []:
                 if isinstance(selected_bins[0], MAPBin):
                     ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins],
@@ -796,7 +789,6 @@ class MAPElites:
                 elif isinstance(selected_bins[0], list):
                     ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins[1]],
                                                     pop=&#39;infeasible&#39;)
-            
             generated = self._step(populations=[fpop, ipop],
                                    gen=gen)
             if generated:
@@ -1651,7 +1643,8 @@ def get_random_elite(mapelites: MAPElites,
         return cs
 
     def _prepare_cs_content(self,
-                            cs: CandidateSolution) -&gt; CandidateSolution:
+                            cs: CandidateSolution,
+                            add_hull: bool = True) -&gt; CandidateSolution:
         &#34;&#34;&#34;Prepare a candidate solution for fitness computation.
         Add a hull if possible and set the blocks colors.
 
@@ -1662,13 +1655,17 @@ def get_random_elite(mapelites: MAPElites,
             CandidateSolution: The updated candidate solution.
         &#34;&#34;&#34;
         # add hull if possible
-        if self.hull_builder:
+        if self.hull_builder and add_hull:
             threadsafe_hullbuilder = HullBuilder(erosion_type=self.hull_builder.erosion_type,
                                                  apply_erosion=self.hull_builder.apply_erosion,
                                                  apply_smoothing=self.hull_builder.apply_smoothing)
             threadsafe_hullbuilder.add_external_hull(structure=cs.content)
         # set the color
         cs.content.set_color(color=cs.base_color)
+        # rotate according to tileset orientation
+        # TODO: this is hardcoded, but should be read from a config file
+        cs.content.rotate(along=1, k=3)
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._prepare_cs_content] Prepared {cs.string} ({add_hull=}).&#39;)
         return cs
     
     def _set_behavior_descriptors(self,
@@ -1693,7 +1690,7 @@ def get_random_elite(mapelites: MAPElites,
         all_cs = []
         for (_, _), cbin in np.ndenumerate(self.bins):
             all_cs.extend([*cbin._feasible, *cbin._infeasible])
-            # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (pre) - {cbin.bin_idx=}; {cbin.new_elite=}&#39;)
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Starting subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
         # update bin sizes
         v_i, v_j = self.bin_sizes[0][i], self.bin_sizes[1][j]
         self.bin_sizes[0][i] = v_i / 2
@@ -1717,9 +1714,9 @@ def get_random_elite(mapelites: MAPElites,
                 x = i
                 y = j
             new_bins[m, n].new_elite = self.bins[x, y].new_elite.copy()
-            # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (post) - {(m, n)=}; {new_bins[m, n].new_elite=}&#39;)
         # assign new bin map
         self.bins = new_bins
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Completed subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
         # assign solutions to bins
         self._update_bins(lcs=all_cs)
         if isinstance(self.emitter, HumanPrefMatrixEmitter):
@@ -1734,6 +1731,7 @@ def get_random_elite(mapelites: MAPElites,
         &#34;&#34;&#34;
         bc0 = np.cumsum([0] + self.bin_sizes[0][:-1]) + self.b_descs[0].bounds[0]
         bc1 = np.cumsum([0] + self.bin_sizes[1][:-1]) + self.b_descs[1].bounds[0]
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._update_bins] Started updating bins...&#39;)
         for cs in lcs:
             b0, b1 = cs.b_descs
             i = np.digitize(x=[b0], bins=bc0, right=False)[0] - 1
@@ -1850,22 +1848,6 @@ def get_random_elite(mapelites: MAPElites,
             for cs in cbin._feasible:
                 cs.c_fitness = sum([self.feasible_fitnesses[i].weight * cs.fitness[i] for i in range(len(cs.fitness))]) + (self.nsc - cs.ncv)
 
-    def reassign_all_content(self, **kwargs) -&gt; None:
-        &#34;&#34;&#34;Reassign all content to the solutions&#34;&#34;&#34;
-        for (_, _), cbin in np.ndenumerate(self.bins):
-            for pop in [cbin._feasible, cbin._infeasible]:
-                for cs in pop:
-                    cs._content = None
-                    cs = self.lsystem._set_structure(cs=self.lsystem._add_ll_strings(cs=cs),
-                                                     make_graph=False)
-                    if cs.is_feasible:
-                        if self.hull_builder is not None:
-                            self.hull_builder.add_external_hull(structure=cs.content)
-                        if kwargs.get(&#39;sym_axis&#39;, None) is not None:
-                            enforce_symmetry(structure=cs.content,
-                                             axis=kwargs.get(&#39;sym_axis&#39;, None),
-                                             upper=kwargs.get(&#39;sym_upper&#39;, None))
-
     def generate_initial_populations(self,
                                      pop_size: int = POP_SIZE,
                                      n_retries: int = N_RETRIES) -&gt; None:
@@ -1887,6 +1869,8 @@ def get_random_elite(mapelites: MAPElites,
                 subdivide_solutions(lcs=solutions,
                                     lsystem=self.lsystem)
                 for cs in solutions:
+                    self._prepare_cs_content(cs=cs,
+                                             add_hull=False)
                     if cs.is_feasible and len(feasible_pop) &lt; pop_size and cs not in feasible_pop:
                         if self.hull_builder is not None:
                             self.hull_builder.add_external_hull(structure=cs._content)
@@ -1967,8 +1951,10 @@ def get_random_elite(mapelites: MAPElites,
                     raise NotImplementedError(f&#39;Unrecognized estimator type {type(self.estimator)}.&#39;)
             # we skip training altogether if we don&#39;t have datapoints
             except EmptyBufferException:
+                logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._step] Skipped training; no datapoints in buffer.&#39;)
                 pass
             # realignment check
+            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}._step] Started realignment...&#39;)
             if self.estimator.is_trained and gen % ALIGNMENT_INTERVAL == 0:
                 # Reassign previous infeasible fitnesses
                 for (_, _), cbin in np.ndenumerate(self.bins):
@@ -2027,7 +2013,6 @@ def get_random_elite(mapelites: MAPElites,
                     new_idx = (idx[0] + offset[0], idx[1] + offset[1])
                     if 0 &lt;= new_idx[0] &lt; self.bins.shape[0] and 0 &lt;= new_idx[1] &lt; self.bins.shape[1]:
                         pool = self.bins[new_idx]._feasible if pop == &#39;feasible&#39; else self.bins[new_idx]._infeasible
-                        logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.seek_nearest_valid] {new_idx=}; {pool=}; {len(new_pop)=}; {to_inspect=}&#39;)
                         if pool:
                             new_pop.extend(pool) 
                             break
@@ -2054,6 +2039,7 @@ def get_random_elite(mapelites: MAPElites,
         &#34;&#34;&#34;
         self._age_bins()
         bin_idxs = [tuple(b) for b in bin_idxs]
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Picked {bin_idxs=}.&#39;)
         chosen_bins = [self.bins[bin_idx] for bin_idx in bin_idxs]
         f_pop, i_pop = [], []
         for chosen_bin in chosen_bins:
@@ -2061,11 +2047,9 @@ def get_random_elite(mapelites: MAPElites,
                 assert chosen_bin in self._valid_bins(), f&#39;Bin at {chosen_bin.bin_idx} is not a valid bin.&#39;
             f_pop.extend(chosen_bin._feasible)
             i_pop.extend(chosen_bin._infeasible)
-        
         if i_pop == []:
             i_pop = self.seek_nearest_valid(bin_idxs=bin_idxs,
                                             pop=&#39;infeasible&#39;)
-        
         generated = self._step(populations=[f_pop, i_pop],
                                gen=gen)
         if generated:
@@ -2079,6 +2063,7 @@ def get_random_elite(mapelites: MAPElites,
             expanded_idxs = []
         s = time.perf_counter()
         if self.emitter is not None and self.emitter.requires_pre:
+            logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Started {self.emitter.name} pre step.&#39;)
             self.emitter.pre_step(bins=self.bins,
                                   selected_idxs=bin_idxs,
                                   expanded_idxs=expanded_idxs,
@@ -2139,7 +2124,7 @@ def get_random_elite(mapelites: MAPElites,
                     ipop.extend(selected_bin._infeasible)
             else:
                 raise NotImplementedError(f&#39;Unrecognized emitter output: {selected_bins}.&#39;)
-            logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {fpop=}; {ipop=}&#39;)
+            logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {len(fpop)=}; {len(ipop)=}&#39;)
             if ipop == []:
                 if isinstance(selected_bins[0], MAPBin):
                     ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins],
@@ -2147,7 +2132,6 @@ def get_random_elite(mapelites: MAPElites,
                 elif isinstance(selected_bins[0], list):
                     ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins[1]],
                                                     pop=&#39;infeasible&#39;)
-            
             generated = self._step(populations=[fpop, ipop],
                                    gen=gen)
             if generated:
@@ -2554,7 +2538,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
                 ipop.extend(selected_bin._infeasible)
         else:
             raise NotImplementedError(f&#39;Unrecognized emitter output: {selected_bins}.&#39;)
-        logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {fpop=}; {ipop=}&#39;)
+        logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.emitter_step] {len(fpop)=}; {len(ipop)=}&#39;)
         if ipop == []:
             if isinstance(selected_bins[0], MAPBin):
                 ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins],
@@ -2562,7 +2546,6 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
             elif isinstance(selected_bins[0], list):
                 ipop = self.seek_nearest_valid(bin_idxs=[b.bin_idx for b in selected_bins[1]],
                                                 pop=&#39;infeasible&#39;)
-        
         generated = self._step(populations=[fpop, ipop],
                                gen=gen)
         if generated:
@@ -2615,6 +2598,8 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
             subdivide_solutions(lcs=solutions,
                                 lsystem=self.lsystem)
             for cs in solutions:
+                self._prepare_cs_content(cs=cs,
+                                         add_hull=False)
                 if cs.is_feasible and len(feasible_pop) &lt; pop_size and cs not in feasible_pop:
                     if self.hull_builder is not None:
                         self.hull_builder.add_external_hull(structure=cs._content)
@@ -2672,6 +2657,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
     &#34;&#34;&#34;
     self._age_bins()
     bin_idxs = [tuple(b) for b in bin_idxs]
+    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Picked {bin_idxs=}.&#39;)
     chosen_bins = [self.bins[bin_idx] for bin_idx in bin_idxs]
     f_pop, i_pop = [], []
     for chosen_bin in chosen_bins:
@@ -2679,11 +2665,9 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
             assert chosen_bin in self._valid_bins(), f&#39;Bin at {chosen_bin.bin_idx} is not a valid bin.&#39;
         f_pop.extend(chosen_bin._feasible)
         i_pop.extend(chosen_bin._infeasible)
-    
     if i_pop == []:
         i_pop = self.seek_nearest_valid(bin_idxs=bin_idxs,
                                         pop=&#39;infeasible&#39;)
-    
     generated = self._step(populations=[f_pop, i_pop],
                            gen=gen)
     if generated:
@@ -2697,6 +2681,7 @@ def from_json(my_args: Dict[str, Any]) -&gt; &#39;MAPElites&#39;:
         expanded_idxs = []
     s = time.perf_counter()
     if self.emitter is not None and self.emitter.requires_pre:
+        logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.interactive_step] Started {self.emitter.name} pre step.&#39;)
         self.emitter.pre_step(bins=self.bins,
                               selected_idxs=bin_idxs,
                               expanded_idxs=expanded_idxs,
@@ -2796,32 +2781,6 @@ The complexity in this case is defined as the number of blocks.</p>
         self._check_res_trigger()
     else:
         self._age_bins(diff=1)</code></pre>
-</details>
-</dd>
-<dt id="pcgsepy.mapelites.map.MAPElites.reassign_all_content"><code class="name flex">
-<span>def <span class="ident">reassign_all_content</span></span>(<span>self, **kwargs) ‑> None</span>
-</code></dt>
-<dd>
-<div class="desc"><p>Reassign all content to the solutions</p></div>
-<details class="source">
-<summary>
-<span>Expand source code</span>
-</summary>
-<pre><code class="python">def reassign_all_content(self, **kwargs) -&gt; None:
-    &#34;&#34;&#34;Reassign all content to the solutions&#34;&#34;&#34;
-    for (_, _), cbin in np.ndenumerate(self.bins):
-        for pop in [cbin._feasible, cbin._infeasible]:
-            for cs in pop:
-                cs._content = None
-                cs = self.lsystem._set_structure(cs=self.lsystem._add_ll_strings(cs=cs),
-                                                 make_graph=False)
-                if cs.is_feasible:
-                    if self.hull_builder is not None:
-                        self.hull_builder.add_external_hull(structure=cs.content)
-                    if kwargs.get(&#39;sym_axis&#39;, None) is not None:
-                        enforce_symmetry(structure=cs.content,
-                                         axis=kwargs.get(&#39;sym_axis&#39;, None),
-                                         upper=kwargs.get(&#39;sym_upper&#39;, None))</code></pre>
 </details>
 </dd>
 <dt id="pcgsepy.mapelites.map.MAPElites.reset"><code class="name flex">
@@ -2945,7 +2904,6 @@ The complexity in this case is defined as the number of blocks.</p>
                 new_idx = (idx[0] + offset[0], idx[1] + offset[1])
                 if 0 &lt;= new_idx[0] &lt; self.bins.shape[0] and 0 &lt;= new_idx[1] &lt; self.bins.shape[1]:
                     pool = self.bins[new_idx]._feasible if pop == &#39;feasible&#39; else self.bins[new_idx]._infeasible
-                    logging.getLogger(&#39;mapelites&#39;).debug(msg=f&#39;[{__name__}.seek_nearest_valid] {new_idx=}; {pool=}; {len(new_pop)=}; {to_inspect=}&#39;)
                     if pool:
                         new_pop.extend(pool) 
                         break
@@ -3060,7 +3018,7 @@ For each bin, 4 new bins are created and the solutions are redistributed amongst
     all_cs = []
     for (_, _), cbin in np.ndenumerate(self.bins):
         all_cs.extend([*cbin._feasible, *cbin._infeasible])
-        # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (pre) - {cbin.bin_idx=}; {cbin.new_elite=}&#39;)
+    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Starting subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
     # update bin sizes
     v_i, v_j = self.bin_sizes[0][i], self.bin_sizes[1][j]
     self.bin_sizes[0][i] = v_i / 2
@@ -3084,9 +3042,9 @@ For each bin, 4 new bins are created and the solutions are redistributed amongst
             x = i
             y = j
         new_bins[m, n].new_elite = self.bins[x, y].new_elite.copy()
-        # logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] {bin_idx=} (post) - {(m, n)=}; {new_bins[m, n].new_elite=}&#39;)
     # assign new bin map
     self.bins = new_bins
+    logging.getLogger(&#39;mapelites&#39;).debug(f&#39;[{__name__}.subdivide_range] Completed subdivision at {bin_idx=}; {self.bins.shape=}.&#39;)
     # assign solutions to bins
     self._update_bins(lcs=all_cs)
     if isinstance(self.emitter, HumanPrefMatrixEmitter):
@@ -3345,7 +3303,6 @@ For each bin, 4 new bins are created and the solutions are redistributed amongst
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.load_population" href="#pcgsepy.mapelites.map.MAPElites.load_population">load_population</a></code></li>
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.population_complexity" href="#pcgsepy.mapelites.map.MAPElites.population_complexity">population_complexity</a></code></li>
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.rand_step" href="#pcgsepy.mapelites.map.MAPElites.rand_step">rand_step</a></code></li>
-<li><code><a title="pcgsepy.mapelites.map.MAPElites.reassign_all_content" href="#pcgsepy.mapelites.map.MAPElites.reassign_all_content">reassign_all_content</a></code></li>
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.reset" href="#pcgsepy.mapelites.map.MAPElites.reset">reset</a></code></li>
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.save_population" href="#pcgsepy.mapelites.map.MAPElites.save_population">save_population</a></code></li>
 <li><code><a title="pcgsepy.mapelites.map.MAPElites.seek_nearest_valid" href="#pcgsepy.mapelites.map.MAPElites.seek_nearest_valid">seek_nearest_valid</a></code></li>

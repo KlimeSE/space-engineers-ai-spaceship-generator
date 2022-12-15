@@ -26,7 +26,8 @@
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">import re
+<pre><code class="python">import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
@@ -65,13 +66,14 @@ class LParser(ABC):
 class HLParser(LParser):
     def expand(self,
                string: str) -&gt; str:
-
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] Initial {string=}.&#39;)
         # get all matches with regex
         matches: List[MyMatch] = []
         for r, rule in zip(self.compiled_lhs, self.rules.get_lhs()):
             matches.extend([MyMatch(lhs=rule,
                                     span=match.span(),
                                     lhs_string=match.group()) for match in r.finditer(string=string)])
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] {len(matches)=}.&#39;)
         # sort matches in-place
         matches.sort()
         # filter out matches
@@ -79,6 +81,7 @@ class HLParser(LParser):
         for match in matches:
             if match.start != filtered_matches[-1].start:
                 filtered_matches.append(match)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] {len(filtered_matches)=}.&#39;)
         # expand using filtered_matches
         offset = 0
         for match in filtered_matches:
@@ -96,7 +99,7 @@ class HLParser(LParser):
             # apply expansion in string
             string = string[:match.start + offset] + rhs + string[match.end + offset:]
             offset += len(rhs) - len(match.lhs_string)
-
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] Final {string=}.&#39;)
         return string
 
 
@@ -226,26 +229,32 @@ class HLtoMLTranslator:
         # add intersection types
         for i, b in enumerate(brackets):
             # get rotation
-            for r in [x.value for x in Rotations]:
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] {i+1}/{len(brackets)}; checking in substring={string[b[0]:b[1]+1]}&#39;)
+            rot_scores = [len(string) for _ in Rotations]
+            rots = [x.value for x in Rotations]
+            for j, r in enumerate(rots):
                 if string.find(r, b[0], b[1]) != -1:
-                    rot = r
-                    break
+                    rot_scores[j] = string.index(r, b[0], b[1])
+            if max(rot_scores) != -1:
+                rot = rots[min(range(len(rot_scores)), key=lambda x : rot_scores[x])]
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] set {rot=}&#39;)
             # check for neighboring rotations
             has_neighbours = False
-            for t0, t1 in brackets[i:]:
-                if b[1] == t0 - 1:
+            for _, t1 in brackets[:i]:
+                if b[0] == t1 + 1:
                     has_neighbours = True
-                    if b[1] not in to_add.keys():
-                        to_add[t1] = [rot]
+                    if t1 not in to_add.keys():
+                        to_add[b[1]] = [rot]
                     else:
-                        to_add[t1] = [*to_add[b[1]], rot]
-                        to_add.pop(b[1])
+                        to_add[b[1]] = [*to_add[t1], rot]
+                        to_add.pop(t1)
                     break
             if not has_neighbours:
                 if b[1] not in to_add:
                     to_add[b[1]] = [rot]
                 else:
                     to_add[b[1]].append(rot)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] {to_add=}&#39;)
         # add to the string
         offset = 0
         for i in sorted(list(to_add.keys())):
@@ -257,12 +266,15 @@ class HLtoMLTranslator:
 
     def transform(self,
                   string: str) -&gt; str:
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] Transforming {string=}&#39;)
         atoms_list = self._string_as_list(string)
         try:
             new_string = self._to_midlvl(atoms_list)
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
             new_string = self._add_intersections(new_string)
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
         except Exception as e:
-            print(string)
+            logging.getLogger(&#39;parser&#39;).error(f&#39;[{__name__}.transform] {string=} {e=}&#39;)
             raise e
         return new_string
 
@@ -311,13 +323,14 @@ inheritance.</p>
 <pre><code class="python">class HLParser(LParser):
     def expand(self,
                string: str) -&gt; str:
-
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] Initial {string=}.&#39;)
         # get all matches with regex
         matches: List[MyMatch] = []
         for r, rule in zip(self.compiled_lhs, self.rules.get_lhs()):
             matches.extend([MyMatch(lhs=rule,
                                     span=match.span(),
                                     lhs_string=match.group()) for match in r.finditer(string=string)])
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] {len(matches)=}.&#39;)
         # sort matches in-place
         matches.sort()
         # filter out matches
@@ -325,6 +338,7 @@ inheritance.</p>
         for match in matches:
             if match.start != filtered_matches[-1].start:
                 filtered_matches.append(match)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] {len(filtered_matches)=}.&#39;)
         # expand using filtered_matches
         offset = 0
         for match in filtered_matches:
@@ -342,7 +356,7 @@ inheritance.</p>
             # apply expansion in string
             string = string[:match.start + offset] + rhs + string[match.end + offset:]
             offset += len(rhs) - len(match.lhs_string)
-
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.expand] Final {string=}.&#39;)
         return string</code></pre>
 </details>
 <h3>Ancestors</h3>
@@ -495,26 +509,32 @@ inheritance.</p>
         # add intersection types
         for i, b in enumerate(brackets):
             # get rotation
-            for r in [x.value for x in Rotations]:
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] {i+1}/{len(brackets)}; checking in substring={string[b[0]:b[1]+1]}&#39;)
+            rot_scores = [len(string) for _ in Rotations]
+            rots = [x.value for x in Rotations]
+            for j, r in enumerate(rots):
                 if string.find(r, b[0], b[1]) != -1:
-                    rot = r
-                    break
+                    rot_scores[j] = string.index(r, b[0], b[1])
+            if max(rot_scores) != -1:
+                rot = rots[min(range(len(rot_scores)), key=lambda x : rot_scores[x])]
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] set {rot=}&#39;)
             # check for neighboring rotations
             has_neighbours = False
-            for t0, t1 in brackets[i:]:
-                if b[1] == t0 - 1:
+            for _, t1 in brackets[:i]:
+                if b[0] == t1 + 1:
                     has_neighbours = True
-                    if b[1] not in to_add.keys():
-                        to_add[t1] = [rot]
+                    if t1 not in to_add.keys():
+                        to_add[b[1]] = [rot]
                     else:
-                        to_add[t1] = [*to_add[b[1]], rot]
-                        to_add.pop(b[1])
+                        to_add[b[1]] = [*to_add[t1], rot]
+                        to_add.pop(t1)
                     break
             if not has_neighbours:
                 if b[1] not in to_add:
                     to_add[b[1]] = [rot]
                 else:
                     to_add[b[1]].append(rot)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}._add_intersections] {to_add=}&#39;)
         # add to the string
         offset = 0
         for i in sorted(list(to_add.keys())):
@@ -526,12 +546,15 @@ inheritance.</p>
 
     def transform(self,
                   string: str) -&gt; str:
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] Transforming {string=}&#39;)
         atoms_list = self._string_as_list(string)
         try:
             new_string = self._to_midlvl(atoms_list)
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
             new_string = self._add_intersections(new_string)
+            logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
         except Exception as e:
-            print(string)
+            logging.getLogger(&#39;parser&#39;).error(f&#39;[{__name__}.transform] {string=} {e=}&#39;)
             raise e
         return new_string</code></pre>
 </details>
@@ -548,12 +571,15 @@ inheritance.</p>
 </summary>
 <pre><code class="python">def transform(self,
               string: str) -&gt; str:
+    logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] Transforming {string=}&#39;)
     atoms_list = self._string_as_list(string)
     try:
         new_string = self._to_midlvl(atoms_list)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
         new_string = self._add_intersections(new_string)
+        logging.getLogger(&#39;parser&#39;).debug(f&#39;[{__name__}.transform] {new_string=}&#39;)
     except Exception as e:
-        print(string)
+        logging.getLogger(&#39;parser&#39;).error(f&#39;[{__name__}.transform] {string=} {e=}&#39;)
         raise e
     return new_string</code></pre>
 </details>
