@@ -25,17 +25,21 @@ You can check the current status of development of the application at the [wiki]
 ## Application
 The following is a quick overview of the application "AI Spaceship Generator". Further documentation is available within the application itself.
 
+The application creates a log file each time it is launched. You can have more information in the log file by adding the `--debug` flag to the executable (note that this will produce much larger log files).
+
 ### AI Spaceship Generator (user mode)
 <p align="center">
   <img src="media/UI_usermode_preview.png" alt="ui_usermode_preview" height="300"/>
 </p>
+
 The default mode for the app. The AI generates an initial "population" of spaceships (top left). When a spaceship is selected from the population it is visualised (top middle) and its properties are displayed (top right). You can choose to "evolve" a new set of spaceships based on either the selected spaceship or a random spaceship (the "evolution" process tries to construct new spaceships based on an existing spaceship). You can also re-initialise the population of spaceships.
 
 ### AI Spaceship Generator (developer mode)
 <p align="center">
   <img src="media/UI_devmode_preview.jpg" alt="ui_devmode_preview" height="300"/>
 </p>
-An advanced mode, with full access to every part of the system that can be changed during the evolution process.
+
+An advanced mode, with full access to every part of the system that can be changed during the evolution process. You can launch the application in developer mode by adding the `--dev_mode` parameter to the executable.
 
 ## Roadmap
 The user study period has concluded (November 2022); thanks to everyone who participated!.
