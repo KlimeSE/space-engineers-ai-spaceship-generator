@@ -171,7 +171,7 @@ def _at_same_z(z: int,
 
 
 def extract_rule(bp_dir: str,
-                 title: str = '') -> Tuple[str, Tuple[int, int, int]]:
+                 title: str = '') -> Tuple[str, List[int], int]:
     """Extract the tile rule of an existing structure.
 
     Args:
@@ -179,14 +179,14 @@ def extract_rule(bp_dir: str,
             title (str, optional): The name of the tile. Defaults to `''`.
 
     Returns:
-            Tuple[str, Tuple[int, int, int]]: The tile rule and the tile dimensions.
+            Tuple[str, List[int], int]: The tile rule, the tile dimensions, and the structure size.
     """
     # load the blueprint file and convert to a structure
     bp = os.path.join(bp_dir, 'bp.sbc')
     root = ET.parse(bp).getroot()
     structure = convert_xml_to_structure(root_node=root)
     structure.sanify()
-    structure.show(title)
+    # structure.show(title)
     blocks = structure.get_all_blocks(to_place=False,
                                       scaled=False)
     # prepare blocks
@@ -266,7 +266,7 @@ def extract_rule(bp_dir: str,
     # compute the tile dimensions
     x, y, z = structure._max_dims
 
-    return rule, (x + structure.grid_size, y + structure.grid_size, z + structure.grid_size)
+    return rule, [x + structure.grid_size, y + structure.grid_size, z + structure.grid_size], structure.grid_size
 
 
 def convert_structure_to_xml(structure: Structure,

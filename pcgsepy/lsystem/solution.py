@@ -11,7 +11,7 @@ from ..structure import Structure
 class CandidateSolution:
     __slots__ = ['string', '_content', 'age', 'b_descs', 'c_fitness', 'fitness', 'hls_mod',
                  'is_feasible', 'll_string', 'n_feas_offspring', 'n_offspring', 'ncv',
-                 'parents', 'representation', 'base_color', 'n_blocks']
+                 'parents', 'representation', 'base_color', 'n_blocks', 'content_size']
     
     def __init__(self,
                  string: str,
@@ -33,6 +33,7 @@ class CandidateSolution:
         self.representation: List[float] = []
         self.base_color = Vec.v3f(x=0.45, y=0.45, z=0.45)  # default block color is #737373
         self.n_blocks = 0
+        self.content_size = (0, 0, 0)
 
     def __str__(self) -> str:
         return f'{self.string}; fitness: {self.c_fitness}; is_feasible: {self.is_feasible}'

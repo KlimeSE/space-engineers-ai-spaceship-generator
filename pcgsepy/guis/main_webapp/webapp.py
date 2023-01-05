@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 from zipfile import ZipFile, ZIP_DEFLATED
+from pcgsepy.config import X_RANGE, Y_RANGE, Z_RANGE
 
 from pcgsepy.guis.voxel import VoxelData
 
@@ -644,7 +645,7 @@ def serve_layout() -> dbc.Container:
                         style={} if app_settings.app_mode == AppMode.DEV else hidden_style)
                 ],
                     style={
-                    'max-height': '30vh',
+                    'max-height': '50vh',
                     'overflow': 'auto'
                 })],
                 align='center')])
@@ -686,7 +687,8 @@ def serve_layout() -> dbc.Container:
                  html.Br(),
                     html.Div(children=[
                         html.P(children=f'Selected bin(s): {app_settings.selected_bins}',
-                            id='selected-bin')
+                               id='selected-bin',
+                               style={'text-align': 'center'})
                     ]),
                     html.Br(),
                 ],
@@ -743,6 +745,80 @@ def serve_layout() -> dbc.Container:
             ],
                 style={'justify-content': 'center'} if app_settings.app_mode == AppMode.DEV else {**{'justify-content': 'center'}, **hidden_style},
                 className="mb-3"),
+            
+            dbc.InputGroup(children=[
+                dbc.InputGroupText('Dimensions Filter:'),
+                    html.Div(children=[
+                        dbc.Row(children=[
+                            dbc.Col(children=[
+                                dbc.Row(children=[
+                                    dbc.FormText("Min and max dimensions along X"),
+                                    dbc.Col(dbc.Input(id='mindim-x',
+                                                      type='number',
+                                                      min=X_RANGE[0],
+                                                      max=X_RANGE[1],
+                                                      value=0,
+                                                      step=1)),
+                                    dbc.Col(dbc.Input(id='maxdim-x',
+                                                      type='number',
+                                                      min=Y_RANGE[0],
+                                                      max=Y_RANGE[1],
+                                                      value=1000,
+                                                      step=1))  
+                                ])
+                                ],
+                                    style={'text-align': 'center'})
+                        ]),
+                        dbc.Row(children=[
+                            dbc.Col(children=[
+                                dbc.Row(children=[
+                                    dbc.FormText("Min and max dimensions along Y"),
+                                    dbc.Col(dbc.Input(id='mindim-y',
+                                                      type='number',
+                                                      min=0,
+                                                      max=995,
+                                                      value=0,
+                                                      step=1)),
+                                    dbc.Col(dbc.Input(id='maxdim-y',
+                                                      type='number',
+                                                      min=Z_RANGE[0],
+                                                      max=Z_RANGE[1],
+                                                      value=1000,
+                                                      step=1))  
+                                ])
+                                ],
+                                    style={'text-align': 'center'})
+                        ]),
+                        dbc.Row(children=[
+                            dbc.Col(children=[
+                                dbc.Row(children=[
+                                    dbc.FormText("Min and max dimensions along Z"),
+                                    dbc.Col(dbc.Input(id='mindim-z',
+                                                      type='number',
+                                                      min=0,
+                                                      max=995,
+                                                      value=0,
+                                                      step=1)),
+                                    dbc.Col(dbc.Input(id='maxdim-z',
+                                                      type='number',
+                                                      min=5,
+                                                      max=1000,
+                                                      value=1000,
+                                                      step=1))  
+                                ])
+                                ],
+                                    style={'text-align': 'center'})
+                        ]),
+                        html.Div(children=[
+                            dbc.Button(id='dims-btn',
+                                       children='Apply Filtering')
+                        ],
+                                 style={'display': 'flex', 'justify-content': 'center'})
+                    ])
+                ],
+                style={'justify-content': 'center'} if app_settings.app_mode == AppMode.DEV else {**{'justify-content': 'center'}, **hidden_style},
+                className="mb-3"),
+            
             dbc.InputGroup(children=[
                 dbc.InputGroupText('Select Emitter:'),
                 dbc.DropdownMenu(label='Random',
@@ -1342,6 +1418,13 @@ def change_emitter_steps(n_steps: int) -> Any:
               Output('voxel-preview-toggle', 'disabled'),
               Output('unsaferules-mode-toggle', 'disabled'),
               Output('evo-iter-sldr', 'disabled'),
+              Output('mindim-x', 'disabled'),
+              Output('maxdim-x', 'disabled'),
+              Output('mindim-y', 'disabled'),
+              Output('maxdim-y', 'disabled'),
+              Output('mindim-z', 'disabled'),
+              Output('maxdim-z', 'disabled'),
+              Output('dims-btn', 'disabled'),
 
               State({'type': 'fitness-sldr', 'index': ALL}, 'disabled'),
               State('method-radio', 'options'),
@@ -1413,6 +1496,13 @@ def interval_updates(fdis: List[Dict[str, bool]],
         'voxel-preview-toggle.disabled': running_something,
         'unsaferules-mode-toggle.disabled': running_something,
         'evo-iter-sldr.disabled': running_something,
+        'mindim-x.disabled': running_something,
+        'maxdim-x.disabled': running_something,
+        'mindim-y.disabled': running_something,
+        'maxdim-y.disabled': running_something,
+        'mindim-z.disabled': running_something,
+        'maxdim-z.disabled': running_something,
+        'dims-btn.disabled': running_something
     }
 
     if running_something and tsm_loading_data_children == []:
@@ -1612,6 +1702,7 @@ def _get_elite_content(mapelites: MAPElites,
                     app_settings.current_mapelites.hull_builder.add_external_hull(structure=elite.content)
             elite.string = original_string
             elite.content.set_color(elite.base_color)
+            elite.content.rotate(along=1, k=3)
         structure = elite.content
         content = structure.as_grid_array
         arr = np.nonzero(content)
@@ -2153,6 +2244,38 @@ def __fitness_weights(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def __apply_dimensions_filtering(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the dimensions filtering to the current population.
+
+    Returns:
+        Dict[str, Any]: The updated application components.
+    """
+    global app_settings
+
+    x_range = (kwargs['minx'], kwargs['maxx'])
+    y_range = (kwargs['miny'], kwargs['maxy'])
+    z_range = (kwargs['minz'], kwargs['maxz'])
+    
+    logging.getLogger('webapp').debug(msg=f'[{__name__}.__apply_dimensions_filtering] {x_range=}; {y_range=}; {z_range=}')
+    
+    app_settings.current_mapelites.update_valid_ranges(x_range=x_range,
+                                                       y_range=y_range,
+                                                       z_range=z_range)
+    app_settings.selected_bins = []
+
+    return {
+        'heatmap-plot.figure': _build_heatmap(mapelites=app_settings.current_mapelites,
+                                              pop_name=kwargs['pop_name'],
+                                              metric_name=kwargs['metric_name'],
+                                              method_name=kwargs['method_name']),
+        'content-plot.figure':  _get_elite_content(mapelites=app_settings.current_mapelites,
+                                                   bin_idx=None,
+                                                   pop=None),
+        'content-string.value': '',
+        'spaceship-properties.children': get_properties_table(),
+    }
+
+
 def __update_heatmap(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Update the MAP-Elites grid heatmap and update the application components.
 
@@ -2185,6 +2308,8 @@ def __update_heatmap(**kwargs: Dict[str, Any]) -> Dict[str, Any]:
                                   method_name=method_name)
     return {
         'heatmap-plot.figure': curr_heatmap,
+        'population-dropdown.label': pop_name,
+        'metric-dropdown.label': metric_name
     }
 
 
@@ -2613,6 +2738,7 @@ triggers_map = {
     'voxel-preview-toggle': __toggle_voxelization,
     'unsaferules-mode-toggle': __show_toggle_unsafe_mode_modal,
     'tsrm-y-btn': __toggle_unsafe_mode,
+    'dims-btn': __apply_dimensions_filtering,
     None: __default
 }
 
@@ -2670,6 +2796,12 @@ triggers_map = {
               State('sm-modal-title', 'children'),
               State('sm-modal-body', 'children'),
               State('emitter-steps-div', 'style'),
+              State('mindim-x', 'value'),
+              State('maxdim-x', 'value'),
+              State('mindim-y', 'value'),
+              State('maxdim-y', 'value'),
+              State('mindim-z', 'value'),
+              State('maxdim-z', 'value'),
 
               Input('population-feasible', 'n_clicks'),
               Input('population-infeasible', 'n_clicks'),
@@ -2715,6 +2847,7 @@ triggers_map = {
               Input("voxel-preview-toggle", "value"),
               Input("unsaferules-mode-toggle", "value"),
               Input("tsrm-y-btn", "n_clicks"),
+              Input('dims-btn', 'n_clicks'),
               )
 def general_callback(curr_heatmap: Dict[str, Any],
                      rules: str,
@@ -2740,6 +2873,12 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      curr_unsafemode_title: str,
                      curr_unsafemode_body: str,
                      curr_emittersteps_style: Dict[str, str],
+                     minx: int,
+                     maxx: int,
+                     miny: int,
+                     maxy: int,
+                     minz: int,
+                     maxz: int,
                      
                      pop_feas: int,
                      pop_infeas: int,
@@ -2785,6 +2924,7 @@ def general_callback(curr_heatmap: Dict[str, Any],
                      switch_voxel_display: bool,
                      switch_unsafemode: bool,
                      confirm_unsafemode_switch: int,
+                     filter_dimensions: int,
                      prevent_initial_call=False) -> Tuple[Any, ...]:
     """General callback for the application.
 
@@ -2871,7 +3011,7 @@ def general_callback(curr_heatmap: Dict[str, Any],
     else:
         event_trig = ctx.triggered[0]['prop_id'].split('.')[0]
 
-    if event_trig is None and first_launch:
+    if event_trig is None and first_launch and app_settings.app_mode == AppMode.USER:
         event_trig = 'reset-btn'
         first_launch = False
     

@@ -1,8 +1,16 @@
 import configparser
 import os
+import sys
 
 config = configparser.ConfigParser()
-curr_dir = os.getcwd()
+
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    os.chdir(sys._MEIPASS)
+    curr_dir = os.path.dirname(sys.executable)
+else:
+    curr_dir = sys.path[0]
+
+# curr_dir = os.getcwd()
 config.read(os.path.join(curr_dir, 'configs.ini'))
 
 USE_TORCH = config['LIBRARY'].getboolean('use_torch')
@@ -80,6 +88,9 @@ BIN_SMALLEST_PERC = config['MAPELITES'].getfloat('bin_min_resolution')
 USE_LINEAR_ESTIMATOR = config['MAPELITES'].getboolean('use_linear_estimator')
 
 N_EPOCHS = config['MAPELITES'].getint('n_epochs')
+X_RANGE = tuple([int(x) for x in config['MAPELITES'].get('x_range').split(',')])
+Y_RANGE = tuple([int(x) for x in config['MAPELITES'].get('y_range').split(',')])
+Z_RANGE = tuple([int(x) for x in config['MAPELITES'].get('z_range').split(',')])
 
 # number of experiments to run
 N_RUNS = config['EXPERIMENT'].getint('n_runs')

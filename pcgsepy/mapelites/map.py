@@ -11,7 +11,7 @@ from joblib import Parallel, delayed
 from pcgsepy.common.jsonifier import json_dumps, json_loads
 from pcgsepy.config import (ALIGNMENT_INTERVAL, BIN_POP_SIZE, CS_MAX_AGE,
                             EPSILON_F, MAX_X_SIZE, MAX_Y_SIZE, MAX_Z_SIZE,
-                            N_ITERATIONS, N_RETRIES, POP_SIZE, USE_TORCH)
+                            N_ITERATIONS, N_RETRIES, POP_SIZE, USE_TORCH, X_RANGE, Y_RANGE, Z_RANGE)
 from pcgsepy.evo.fitness import (Fitness, box_filling_fitness,
                                  func_blocks_fitness, mame_fitness,
                                  mami_fitness)
@@ -158,6 +158,8 @@ class MAPElites:
         # tracking properties
         self.n_new_solutions = 0
         
+        self.x_range, self.y_range, self.z_range = X_RANGE, Y_RANGE, Z_RANGE
+        
     def show_metric(self,
                     metric: str,
                     show_mean: bool = True,
@@ -294,6 +296,7 @@ class MAPElites:
         # rotate according to tileset orientation
         # TODO: this is hardcoded, but should be read from a config file
         cs.content.rotate(along=1, k=3)
+        cs.content_size = cs.content._max_dims
         logging.getLogger('mapelites').debug(f'[{__name__}._prepare_cs_content] Prepared {cs.string} ({add_hull=}).')
         return cs
     
@@ -477,6 +480,19 @@ class MAPElites:
             for cs in cbin._feasible:
                 cs.c_fitness = sum([self.feasible_fitnesses[i].weight * cs.fitness[i] for i in range(len(cs.fitness))]) + (self.nsc - cs.ncv)
 
+    def _within_range(self,
+                      cs: CandidateSolution) -> bool:
+        """Check if the solution dimensions are within the allowed range.
+
+        Args:
+            cs (CandidateSolution): The candidate solution.
+
+        Returns:
+            bool: Whether the solution dimensions are within the allowed range.
+        """
+        cs_dims = cs.content._max_dims if cs._content else cs.content_size
+        return self.x_range[0] <= cs_dims[0] <= self.x_range[1] and self.y_range[0] <= cs_dims[1] <= self.y_range[1] and self.z_range[0] <= cs_dims[2] <= self.z_range[1]
+    
     def generate_initial_populations(self,
                                      pop_size: int = POP_SIZE,
                                      n_retries: int = N_RETRIES) -> None:
@@ -500,12 +516,13 @@ class MAPElites:
                 for cs in solutions:
                     self._prepare_cs_content(cs=cs,
                                              add_hull=False)
-                    if cs.is_feasible and len(feasible_pop) < pop_size and cs not in feasible_pop:
-                        if self.hull_builder is not None:
-                            self.hull_builder.add_external_hull(structure=cs._content)
-                        feasible_pop.append(self._assign_fitness(cs=cs))
-                    elif not cs.is_feasible and len(infeasible_pop) < pop_size and cs not in feasible_pop:
-                        infeasible_pop.append(self._assign_fitness(cs=cs))
+                    if self._within_range(cs=cs):
+                        if cs.is_feasible and len(feasible_pop) < pop_size and cs not in feasible_pop:
+                            if self.hull_builder is not None:
+                                self.hull_builder.add_external_hull(structure=cs._content)
+                            feasible_pop.append(self._assign_fitness(cs=cs))
+                        elif not cs.is_feasible and len(infeasible_pop) < pop_size and cs not in feasible_pop:
+                            infeasible_pop.append(self._assign_fitness(cs=cs))
                 iterations.set_postfix(ordered_dict={
                     'fpop-size': f'{len(feasible_pop)}/{pop_size}',
                     'ipop-size': f'{len(infeasible_pop)}/{pop_size}'
@@ -562,6 +579,9 @@ class MAPElites:
                 except EvoException as e:
                     logging.getLogger('mapelites').error(msg=f'[{__name__}._step] {e}')
                     pass
+        
+        generated = list(filter(self._within_range, generated))
+        
         # if possible, train the estimator for fitness acquirement
         if self.estimator is not None:
             # Prepare dataset for estimator
@@ -775,6 +795,23 @@ class MAPElites:
                                          reward=sum([f(self) for f in self.agent_rewards]))
         return emitter_time
 
+    def update_valid_ranges(self,
+                            x_range: Tuple[int, int],
+                            y_range: Tuple[int, int],
+                            z_range: Tuple[int, int]) -> None:
+        """Update the valid ranges of the spaceships' dimensions, and update the population.
+
+        Args:
+            x_range (Tuple[int, int]): The new range for the X axis.
+            y_range (Tuple[int, int]): The new range for the Y axis.
+            z_range (Tuple[int, int]): The new range for the Z axis.
+        """
+        self.x_range, self.y_range, self.z_range = x_range, y_range, z_range
+        for (_, _), b in np.ndenumerate(self.bins):
+            b._feasible = list(filter(self._within_range, b._feasible))
+            b._infeasible = list(filter(self._within_range, b._infeasible))
+    
+    
     def reset(self,
               lcs: Optional[List[CandidateSolution]] = None) -> None:
         """Reset the current MAP-Elites.

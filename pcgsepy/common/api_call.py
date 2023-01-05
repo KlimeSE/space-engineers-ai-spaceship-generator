@@ -2,6 +2,7 @@ import json
 import os
 import random
 from enum import Enum
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from pcgsepy.common.jsonrpc import TransportTcpIp
@@ -69,7 +70,15 @@ def call_api(host: str = HOST,
 
 
 # block_definitions as a module-level variable
-if not os.path.exists('./block_definitions.json'):
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    os.chdir(sys._MEIPASS)
+    curr_dir = os.path.dirname(sys.executable)
+else:
+    curr_dir = sys.path[0]
+
+block_definitions_fname = os.path.join(curr_dir, 'block_definitions.json')
+
+if not os.path.exists(block_definitions_fname):
     # poll API for block definition ids
     jsons = [generate_json(method="Definitions.BlockDefinitions")]
     res = call_api(jsons=jsons)
@@ -84,10 +93,10 @@ if not os.path.exists('./block_definitions.json'):
                               'Type': v['DefinitionId']['Type']},
             'mountpoints': v['MountPoints']
         }
-    with open('./block_definitions.json', 'w') as f:
+    with open(block_definitions_fname, 'w') as f:
         json.dump(block_definitions, f)
 else:
-    with open('./block_definitions.json', 'r') as f:
+    with open(block_definitions_fname, 'r') as f:
         block_definitions = json.load(f)
 
 

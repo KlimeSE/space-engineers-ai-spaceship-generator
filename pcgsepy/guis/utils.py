@@ -133,7 +133,7 @@ class AppSettings:
                     'feasible': CS_MAX_AGE,
                     'infeasible': CS_MAX_AGE
                 },
-                'colorscale': 'Greys'
+                'colorscale': 'Aggrnyl'
             },
             'Coverage': {
                 'name': 'size',
