@@ -2658,7 +2658,7 @@ def __toggle_unsafe_mode(**kwargs) -> Dict[str, Any]:
     curr_unsafemode = kwargs['curr_unsafemode']
     logging.getLogger('webapp').info(msg=f'Toggling safe mode to {not curr_unsafemode}')
     logging.getLogger('webapp').debug(msg=f'[{__name__}.__toggle_unsafe_mode] Current safe mode is {curr_unsafemode}')
-    ruleset = 'hlrules' if curr_unsafemode else 'hlrules_sm'
+    ruleset = os.path.join(curr_folder, 'hlrules') if curr_unsafemode else os.path.join(curr_folder, 'hlrules_sm')
     logging.getLogger('webapp').debug(msg=f'[{__name__}.__toggle_unsafe_mode] New HL ruleset is {ruleset}')
     try:
         new_rules = RuleMaker(ruleset=ruleset).get_rules()
