@@ -61,7 +61,7 @@ Happy tile making!
 ## Roadmap
 The user study period has concluded (November 2022); thanks to everyone who participated!.
 
-This project will be actively supported until the end of December 2022.
+After the end of 2022, the project's active support phase ended.
 
 ## Development
 This project requires Python 3. The `PCGSEPy` library (including its requirements) can be installed by running `pip install -e .`. To use PyTorch in the library (required for some research experiments, but not the application), first set the `use_torch` flag in `configs.ini`.
