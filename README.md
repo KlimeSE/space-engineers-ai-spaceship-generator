@@ -41,6 +41,23 @@ The default mode for the app. The AI generates an initial "population" of spaces
 
 An advanced mode, with full access to every part of the system that can be changed during the evolution process. You can launch the application in developer mode by adding the `--dev_mode` parameter to the executable.
 
+### TilesMaker
+<p align="center">
+  <img src="media/tilesmaker_preview.jpg" alt="tilesmaker_preview" height="300"/>
+</p>
+The TilesMaker is a command-line application that makes it easy for any user to integrate their tiles in the "AI Spaceship Generator".
+
+To create a tile, place the blueprint folder created in Space Engineers in the *tileset* folder (if it does not exist, it will be created when the application is first launched). The TilesMaker will then ask you which blueprint to create a tile from, as well as an optional custom name for the tile. Then, simply follow the instructions reported in the program to add the tile.
+
+Remember to modify the high-level rules (*hlrules* and *hlrules_sm*) with your new tile, making sure the probability of expansions always sums up to 1 (otherwise an error will be thrown and the application will not start). For example, if you have create the tile *mytile* and the current high-level rules are:
+- simpletile 1 nexttile
+
+And you want *mytile* to be created from *simpletile* as well, then the updated high-level rules may be like this:
+- simpletile 0.4 nexttile
+- simpletile 0.6 mytile
+
+Happy tile making!
+
 ## Roadmap
 The user study period has concluded (November 2022); thanks to everyone who participated!.
 
