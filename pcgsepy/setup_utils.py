@@ -1,5 +1,7 @@
 import copy
 import json
+import os
+import sys
 from typing import Any, Dict, List
 
 import matplotlib
@@ -53,8 +55,14 @@ def get_default_lsystem(used_ll_blocks: List[str]) -> LSystem:
     Returns:
         LSystem: The default L-system.
     """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        os.chdir(sys._MEIPASS)
+        curr_dir = os.path.dirname(sys.executable)
+    else:
+        curr_dir = sys.path[0]
+    
     # load the common atoms
-    with open(COMMON_ATOMS, "r") as f:
+    with open(os.path.join(curr_dir, COMMON_ATOMS), "r") as f:
         common_alphabet: Dict[str, Any] = json.load(f)
     # add actions
     action_to_args = {
@@ -66,7 +74,7 @@ def get_default_lsystem(used_ll_blocks: List[str]) -> LSystem:
     common_alphabet.update({k: {'action': AtomAction(common_alphabet[k]["action"]),
                                 'args': action_to_args[AtomAction(common_alphabet[k]["action"])].get(str(common_alphabet[k]["args"]), common_alphabet[k]["args"])} for k in common_alphabet})
     # load high-level atoms
-    with open(HL_ATOMS, "r") as f:
+    with open(os.path.join(curr_dir, HL_ATOMS), "r") as f:
         hl_atoms = json.load(f)
     # get the tile properties
     tiles_dimensions = {tile: Vec.from_tuple(hl_atoms[tile]["dimensions"]) for tile in hl_atoms}
