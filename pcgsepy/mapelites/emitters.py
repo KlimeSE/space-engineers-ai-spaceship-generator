@@ -525,7 +525,7 @@ class ContextualBanditEmitter(Emitter):
                                               max_iter=N_EPOCHS).fit(X=xs, y=ys)
         else:
             raise ValueError(f'Unrecognized estimator type: {self._estimator}')
-        logging.getLogger('emitter').debug(f'[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}')
+        # logging.getLogger('emitter').debug(f'[{__name__}._fit] datapoints={len(xs)}; nonzero_count={len(np.nonzero(ys)[0])}; estimator_score={self.estimator.score(xs, ys):.2%}')
         self._fitted = True
     
     def _extract_bin_context(self,

@@ -299,6 +299,7 @@ if USE_TORCH:
         xs = th.tensor(xs).float().squeeze(1)
         ys = th.tensor(ys).float().unsqueeze(1)
         losses = []
+        estimator = MLPEstimator(xshape=xs.shape[1], yshape=ys.shape[1])
         for _ in range(n_epochs):
             estimator.optimizer.zero_grad()
             out = estimator(xs)
@@ -306,9 +307,8 @@ if USE_TORCH:
             losses.append(loss.item())
             loss.backward()
             estimator.optimizer.step()
-        
+
         estimator.train_losses.append(losses[-1])
-        
         estimator.is_trained = True
     
 
