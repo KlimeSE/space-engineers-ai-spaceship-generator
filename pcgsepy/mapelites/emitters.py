@@ -508,14 +508,14 @@ class ContextualBanditEmitter(Emitter):
             self.estimator = Ridge(solver='svd',
                                    max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == 'mlp':
-            # if USE_TORCH:
-            #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
-            #                                         yshape=1)
-            #     train_estimator(estimator=self._estimator,
-            #                     xs=xs,
-            #                     ys=ys,
-            #                     n_epochs=20)
-            # else:
+            if USE_TORCH:
+                self.estimator = NonLinearEstimator(xshape=self._n_features_context,
+                                                    yshape=1)
+                train_estimator(estimator=self._estimator,
+                                xs=xs,
+                                ys=ys,
+                                n_epochs=20)
+            else:
                 self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation='relu',
                                               alpha=1e-3,
@@ -623,8 +623,8 @@ class ContextualBanditEmitter(Emitter):
             j['n_layers_']: self.estimator.n_layers_
             j['n_outputs_']: self.estimator.n_outputs_
             j['out_activation_']: self.estimator.out_activation_
-        # elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
-        #     j['estimator_parameters'] = self._estimator.to_json()
+        elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
+            j['estimator_parameters'] = self._estimator.to_json()
         return j
     
     @staticmethod
@@ -645,8 +645,8 @@ class ContextualBanditEmitter(Emitter):
         re._fitted = my_args['fitted']
         
         if 'estimator_name' in my_args.keys():
-            # if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
-            #     re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
+            if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
+                re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
             if my_args['estimator_name'] == 'linear':
                 re._estimator = 'linear'
                 re.estimator = LinearRegression()
@@ -723,14 +723,14 @@ class PreferenceBanditEmitter(Emitter):
             self.estimator = Ridge(solver='svd',
                                    max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == 'mlp':
-            # if USE_TORCH:
-            #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
-            #                                         yshape=1)
-            #     train_estimator(estimator=self._estimator,
-            #                     xs=xs,
-            #                     ys=ys,
-            #                     n_epochs=20)
-            # else:
+            if USE_TORCH:
+                self.estimator = NonLinearEstimator(xshape=self._n_features_context,
+                                                    yshape=1)
+                train_estimator(estimator=self._estimator,
+                                xs=xs,
+                                ys=ys,
+                                n_epochs=20)
+            else:
                 self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation='relu',
                                               alpha=1e-3,
@@ -834,8 +834,8 @@ class PreferenceBanditEmitter(Emitter):
             j['n_layers_']: self.estimator.n_layers_
             j['n_outputs_']: self.estimator.n_outputs_
             j['out_activation_']: self.estimator.out_activation_
-        # elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
-        #     j['estimator_parameters'] = self._estimator.to_json()
+        elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
+            j['estimator_parameters'] = self._estimator.to_json()
         
         return j
     
@@ -856,8 +856,8 @@ class PreferenceBanditEmitter(Emitter):
         re._fitted = my_args['fitted']
         
         if 'estimator_name' in my_args.keys():
-            # if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
-            #     re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
+            if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
+                re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
             if my_args['estimator_name'] == 'linear':
                 re._estimator = 'linear'
                 re.estimator = LinearRegression()
@@ -1237,14 +1237,14 @@ class SimpleTabularEmitter(Emitter):
             self.estimator = Ridge(solver='svd',
                                    max_iter=N_EPOCHS).fit(X=xs, y=ys)
         elif self._estimator == 'mlp':
-            # if USE_TORCH:
-            #     self.estimator = NonLinearEstimator(xshape=self._n_features_context,
-            #                                         yshape=1)
-            #     train_estimator(estimator=self._estimator,
-            #                     xs=xs,
-            #                     ys=ys,
-            #                     n_epochs=20)
-            # else:
+            if USE_TORCH:
+                self.estimator = NonLinearEstimator(xshape=self._n_features_context,
+                                                    yshape=1)
+                train_estimator(estimator=self._estimator,
+                                xs=xs,
+                                ys=ys,
+                                n_epochs=20)
+            else:
                 self.estimator = MLPRegressor(hidden_layer_sizes=(200, 200),
                                               activation='relu',
                                               alpha=1e-3,
@@ -1365,8 +1365,8 @@ class SimpleTabularEmitter(Emitter):
             j['n_layers_']: self.estimator.n_layers_
             j['n_outputs_']: self.estimator.n_outputs_
             j['out_activation_']: self.estimator.out_activation_
-        # elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
-        #     j['estimator_parameters'] = self._estimator.to_json()
+        elif USE_TORCH and isinstance(self._estimator, NonLinearEstimator):
+            j['estimator_parameters'] = self._estimator.to_json()
         
         return j
     
@@ -1390,8 +1390,8 @@ class SimpleTabularEmitter(Emitter):
         re.ts_priors = my_args['ts_priors']
         
         if 'estimator_name' in my_args.keys():
-            # if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
-            #     re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
+            if my_args['estimator_name'] == 'NonLinearEstimator' and USE_TORCH and not USE_LINEAR_ESTIMATOR:
+                re._estimator = NonLinearEstimator.from_json(my_args=my_args['estimator_parameters'])
             if my_args['estimator_name'] == 'linear':
                 re._estimator = 'linear'
                 re.estimator = LinearRegression()

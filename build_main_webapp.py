@@ -27,16 +27,16 @@ pyi_args = ['main_webapp_launcher.py',
 
 pyinst.run(pyi_args)
 
-pyi_args = [
-    'tiles_maker.py',
-    '--clean',
-    '--onefile',
-    '--noconfirm',
-    '--name', 'TilesMaker',
-    '--icon', 'assets\\favicon.ico',
-    '--splash', 'assets\\thumb.png',
-]
+# pyi_args = [
+    # 'tiles_maker.py',
+    # '--clean',
+    # '--onefile',
+    # '--noconfirm',
+    # '--name', 'TilesMaker',
+    # '--icon', 'assets\\favicon.ico',
+    # '--splash', 'assets\\thumb.png',
+# ]
 
-pyinst.run(pyi_args)
+# pyinst.run(pyi_args)
 
 # TODO: automatically copy generated exe at same level as file
